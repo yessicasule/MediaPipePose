@@ -1,0 +1,36 @@
+# Dependency directories
+node_modules/
+.venv/
+env/
+venv/
+ENV/
+bin/
+lib/
+share/
+Include/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.tox/
+.nox/
+
+# System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+PoseTrack/outputs/
+*.log
