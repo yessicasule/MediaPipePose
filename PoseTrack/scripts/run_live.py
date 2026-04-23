@@ -32,10 +32,32 @@ def main():
     filter_sys = AngleFilterSystem(filter_type=args.filter)
     streamer = UdpAngleStreamer(host=args.host, port=args.port, hz=Config.OUTPUT_VIDEO_FPS)
     
-    # Input
-    cap = cv2.VideoCapture(args.video if args.video else args.camera)
+    # Input — try multiple backends in order: MSMF → default → index 1
+    if args.video:
+        cap = cv2.VideoCapture(args.video)
+    else:
+        backends = [
+            (args.camera, cv2.CAP_MSMF),   # Media Foundation (best on Windows)
+            (args.camera, 0),               # OpenCV auto-select
+            (1, cv2.CAP_MSMF),             # Try next camera index
+        ]
+        cap = None
+        for idx, backend in backends:
+            _cap = cv2.VideoCapture(idx, backend) if backend else cv2.VideoCapture(idx)
+            if _cap.isOpened():
+                cap = _cap
+                print(f"Opened camera index={idx} backend={'MSMF' if backend == cv2.CAP_MSMF else 'auto'}")
+                break
+            _cap.release()
+        if cap is None:
+            cap = cv2.VideoCapture()  # dummy — will fail isOpened() check below
+
     if not cap.isOpened():
         print("Error: Could not open video source.")
+        print("  > Check: Settings > Privacy > Camera - ensure camera access is ON for desktop apps")
+        print("  > Check: No other app (Teams, Zoom, OBS) is holding the camera")
+        print("  > Try: --camera 1 or --camera 2")
+        print("  > Try: --video path/to/file.mp4  to use a video file instead")
         return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_WIDTH)

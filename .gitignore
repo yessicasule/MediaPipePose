@@ -34,3 +34,23 @@ desktop.ini
 # Project specific
 PoseTrack/outputs/
 *.log
+
+# Unity
+[Ll]ibrary/
+[Ll]ogs/
+[Oo]bj/
+[Tt]emp/
+[Uu]ser[Ss]ettings/
+*.unitypackage
+*.asset
+*.prefab
+*.controller
+Packages/
+ProjectSettings/
+*.inputactions
+*.wlt
+
+# MediaPipePose specific to keep
+!PoseTrack/Unity/PoseTrackReceiver/*.cs
+!Unity/UnityMedia/Assets/X Bot.fbx
+!Unity/UnityMedia/Assets/Scenes/SampleScene.unity
