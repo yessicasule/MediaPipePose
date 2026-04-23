@@ -35,6 +35,17 @@ desktop.ini
 PoseTrack/outputs/
 *.log
 
+# Benchmark cache
+PoseTrack/benchmarks/frames/
+PoseTrack/benchmarks/results/
+PoseTrack/benchmarks/posenet_tfjs/node_modules/
+
+# Models (downloadable)
+PoseTrack/models/
+
+# Legacy (unused)
+PoseTrack/legacy/
+
 # Unity
 [Ll]ibrary/
 [Ll]ogs/
