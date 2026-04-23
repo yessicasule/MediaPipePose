@@ -41,16 +41,19 @@ PoseTrack/outputs/
 [Oo]bj/
 [Tt]emp/
 [Uu]ser[Ss]ettings/
-*.unitypackage
-*.asset
-*.prefab
-*.controller
 Packages/
 ProjectSettings/
 *.inputactions
 *.wlt
+*.asset
+*.prefab
+*.controller
+Packages/
+*.unitypackage
 
 # MediaPipePose specific to keep
 !PoseTrack/Unity/PoseTrackReceiver/*.cs
 !Unity/UnityMedia/Assets/X Bot.fbx
 !Unity/UnityMedia/Assets/Scenes/SampleScene.unity
+!Unity/UnityMedia/Assets/Scripts/*.cs
+!Unity/UnityMedia/Assets/TutorialInfo/Scripts/*.cs
