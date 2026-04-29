@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(python scripts/run_live.py --filter kalman)",
+      "Bash(python -c ' *)",
+      "Read(//c/Users/yessi/AppData/Local/Programs/Python/Python310/lib/site-packages/mediapipe/tasks/python/core/**)",
+      "Read(//d/d/MediaPipePose/PoseTrack/data/sessions/**)"
     ]
   }
 }

@@ -56,9 +56,6 @@ class KalmanFilter1D:
 
 class AngleFilterSystem:
     def __init__(self, filter_type: str = "kalman"):
-        """
-        Manages per-joint filters. filter_type can be 'ema' or 'kalman'.
-        """
         self.filter_type = filter_type.lower()
         self.filters = {
             "elbow": self._create_filter(),
@@ -71,14 +68,9 @@ class AngleFilterSystem:
         if self.filter_type == "ema":
             return ExponentialMovingAverageFilter(alpha=0.2)
         else:
-            # Default to Kalman filter for optimal stability
             return KalmanFilter1D(process_noise=0.01, measurement_noise=1.5)
             
     def update(self, joint_angles: dict) -> dict:
-        """
-        Applies filter to raw angles. joint_angles must contain keys:
-        'elbow_flexion', 'shoulder_elevation', 'shoulder_yaw', 'shoulder_roll'
-        """
         filtered = {
             "elbow_flexion": self.filters["elbow"].update(joint_angles.get("elbow_flexion", 0.0)),
             "shoulder_elevation": self.filters["shoulder_pitch"].update(joint_angles.get("shoulder_elevation", 0.0)),
@@ -86,7 +78,7 @@ class AngleFilterSystem:
             "shoulder_roll": self.filters["shoulder_roll"].update(joint_angles.get("shoulder_roll", 0.0))
         }
         return filtered
-
+    
     def reset(self):
         for f in self.filters.values():
             f.reset()

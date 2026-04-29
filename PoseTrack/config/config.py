@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-# Base Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 RAW_VIDEOS_DIR = DATA_DIR / "raw_videos"
@@ -10,18 +9,12 @@ LANDMARKS_DIR = DATA_DIR / "landmarks"
 ANGLES_DIR = DATA_DIR / "angles"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
-# UDP Streaming Settings
 UDP_IP = "127.0.0.1"
 UDP_PORT = 9000
 STREAM_HZ = 30.0
 
-# Filter Settings
-DEFAULT_FILTER_TYPE = "kalman" # options: 'ema', 'kalman'
+DEFAULT_FILTER_TYPE = "kalman"
 
-# Normalizations
-# Unity expects angles in degrees.
-# 0 degrees = arm straight down
-# 90 degrees = arm straight out/forward
 ANGLE_UNITS = "degrees"
 
 class Config:

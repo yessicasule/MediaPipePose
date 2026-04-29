@@ -1,13 +1,13 @@
 # Dependency directories
-node_modules/
-.venv/
-env/
-venv/
-ENV/
-bin/
-lib/
-share/
-Include/
+**/node_modules/
+**/.venv/
+**/env/
+**/venv/
+**/ENV/
+**/bin/
+**/lib/
+**/share/
+**/Include/
 
 # Python Cache
 __pycache__/
@@ -33,12 +33,12 @@ desktop.ini
 
 # Project specific
 PoseTrack/outputs/
+PoseTrack/data/
 *.log
+**/frames/
 
 # Benchmark cache
-PoseTrack/benchmarks/frames/
 PoseTrack/benchmarks/results/
-PoseTrack/benchmarks/posenet_tfjs/node_modules/
 
 # Models (downloadable)
 PoseTrack/models/
@@ -59,12 +59,7 @@ ProjectSettings/
 *.asset
 *.prefab
 *.controller
-Packages/
 *.unitypackage
-
-# MediaPipePose specific to keep
-!PoseTrack/Unity/PoseTrackReceiver/*.cs
-!Unity/UnityMedia/Assets/X Bot.fbx
-!Unity/UnityMedia/Assets/Scenes/SampleScene.unity
-!Unity/UnityMedia/Assets/Scripts/*.cs
-!Unity/UnityMedia/Assets/TutorialInfo/Scripts/*.cs
+*.meta
+*.unity
+*.fbx

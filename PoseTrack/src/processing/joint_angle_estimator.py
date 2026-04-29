@@ -8,7 +8,6 @@ HIP_L    = 23
 HIP_R    = 24
 
 def _vec(a, b):
-    # Depending on the landmark format (MediaPipe objects have .x, .y, .z)
     try:
         return np.array([b.x - a.x, b.y - a.y, b.z - a.z], dtype=float)
     except AttributeError:
@@ -29,7 +28,6 @@ def compute_elbow_flexion(landmarks) -> float:
     return 180.0 - straight_angle
 
 def compute_shoulder_elevation(landmarks) -> float:
-    # Also known as shoulder pitch
     try:
         hip_mid = np.array([
             (landmarks[HIP_L].x + landmarks[HIP_R].x) / 2,
@@ -57,7 +55,6 @@ def compute_shoulder_elevation(landmarks) -> float:
     return _angle_between(torso_up, upper_arm)
 
 def compute_shoulder_horizontal(landmarks) -> float:
-    # Also known as shoulder yaw
     try:
         shoulder_l = np.array([landmarks[11].x, landmarks[11].y, landmarks[11].z])
         shoulder_r = np.array([landmarks[12].x, landmarks[12].y, landmarks[12].z])
@@ -107,7 +104,7 @@ def compute_shoulder_roll(landmarks) -> float:
 def compute_all(landmarks) -> dict:
     try:
         return {
-            "elbow_flexion":         compute_elbow_flexion(landmarks),
+            "elbow_flexion":        compute_elbow_flexion(landmarks),
             "shoulder_elevation":    compute_shoulder_elevation(landmarks),
             "shoulder_yaw":          compute_shoulder_horizontal(landmarks),
             "shoulder_roll":         compute_shoulder_roll(landmarks)
@@ -115,7 +112,7 @@ def compute_all(landmarks) -> dict:
     except Exception:
         return {
             "elbow_flexion":       0.0,
-            "shoulder_elevation":  0.0,
+            "shoulder_elevation":   0.0,
             "shoulder_yaw":        0.0,
             "shoulder_roll":       0.0
         }

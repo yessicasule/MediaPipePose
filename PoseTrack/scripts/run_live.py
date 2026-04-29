@@ -4,7 +4,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Fix python path for isolated execution
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.pose.mediapipe_runner import MediaPipeRunner
@@ -24,7 +23,6 @@ def main():
 
     print(f"Starting Real-Time Pipeline on {args.host}:{args.port} using {args.filter} filter")
 
-    # Components
     pose_runner = MediaPipeRunner(
         min_detection_confidence=Config.MIN_DETECTION_CONFIDENCE,
         min_tracking_confidence=Config.MIN_TRACKING_CONFIDENCE
@@ -32,14 +30,13 @@ def main():
     filter_sys = AngleFilterSystem(filter_type=args.filter)
     streamer = UdpAngleStreamer(host=args.host, port=args.port, hz=Config.OUTPUT_VIDEO_FPS)
     
-    # Input — try multiple backends in order: MSMF → default → index 1
     if args.video:
         cap = cv2.VideoCapture(args.video)
     else:
         backends = [
-            (args.camera, cv2.CAP_MSMF),   # Media Foundation (best on Windows)
-            (args.camera, 0),               # OpenCV auto-select
-            (1, cv2.CAP_MSMF),             # Try next camera index
+            (args.camera, cv2.CAP_MSMF),
+            (args.camera, 0),
+            (1, cv2.CAP_MSMF),
         ]
         cap = None
         for idx, backend in backends:
@@ -50,7 +47,7 @@ def main():
                 break
             _cap.release()
         if cap is None:
-            cap = cv2.VideoCapture()  # dummy — will fail isOpened() check below
+            cap = cv2.VideoCapture()
 
     if not cap.isOpened():
         print("Error: Could not open video source.")
@@ -63,7 +60,6 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.FRAME_HEIGHT)
 
-    # Start UDP stream
     streamer.start()
 
     print("Pipeline running. Press 'q' to stop.")
@@ -73,33 +69,25 @@ def main():
             ret, frame = cap.read()
             if not ret:
                 if args.video:
-                    # loop video
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 else:
                     break
 
-            # Process
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             landmarks = pose_runner.process(image_rgb)
 
             if landmarks is not None:
-                # Visibility check could be added here before calculation
                 raw_angles = compute_all(landmarks)
                 filtered_angles = filter_sys.update(raw_angles)
                 
-                # Stream out
                 streamer.update_angles(
                     shoulder_pitch = filtered_angles["shoulder_elevation"],
                     shoulder_yaw   = filtered_angles["shoulder_yaw"],
                     shoulder_roll  = filtered_angles["shoulder_roll"],
                     elbow_flex     = filtered_angles["elbow_flexion"]
                 )
-            else:
-                # Retains last known in streamer thread by ignoring update
-                pass
 
-            # Visual feedback (optional)
             cv2.imshow("Real-Time Feed", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

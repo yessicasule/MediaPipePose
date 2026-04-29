@@ -1,9 +1,3 @@
-"""
-Unified Multi-Framework Pose Estimation Benchmark Runner
-
-Processes synchronized video data through MediaPipe, PoseNet, and MoveNet
-for comprehensive performance and accuracy comparison.
-"""
 import argparse
 import json
 import shutil
@@ -15,10 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
-
 @dataclass
 class BenchmarkConfig:
-    """Configuration for benchmark run"""
     session_name: str
     video_path: Optional[str] = None
     frames_dir: Optional[str] = None
@@ -37,7 +29,6 @@ class BenchmarkConfig:
 
 @dataclass 
 class BenchmarkResults:
-    """Container for all benchmark results"""
     session_name: str
     timestamp: str
     total_duration_s: float = 0.0
@@ -49,15 +40,6 @@ class BenchmarkResults:
 
 
 class UnifiedBenchmarkRunner:
-    """
-    Unified runner for multi-framework pose estimation benchmarking.
-    
-    Workflow:
-    1. Extract frames from video (if not already done)
-    2. Run benchmarks on all specified frameworks
-    3. Collect and compare results
-    4. Generate comprehensive comparison report
-    """
     
     def __init__(self, config: BenchmarkConfig):
         self.config = config
@@ -78,60 +60,62 @@ class UnifiedBenchmarkRunner:
         self._setup_directories()
     
     def _setup_directories(self):
-        """Create output directories"""
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         print(f"Session directory: {self.session_dir}")
     
     def extract_frames(self, force: bool = False) -> Path:
-        """
-        Extract frames from video for consistent benchmarking
-        
-        Args:
-            force: Force re-extraction even if frames exist
-        
-        Returns:
-            Path to extracted frames directory
-        """
         if self.config.frames_dir:
             frames_path = Path(self.config.frames_dir)
-            if frames_path.exists() and list(frames_path.glob("*.jpg")):
-                print(f"Using existing frames: {frames_path}")
+            jpg_files = list(frames_path.glob("*.jpg"))
+            if jpg_files:
+                print(f"Using existing frames ({len(jpg_files)} files): {frames_path}")
                 return frames_path
-        
+            if not frames_path.exists():
+                raise FileNotFoundError(
+                    f"Frames directory not found: {frames_path}\n"
+                    f"Run first:  python benchmarks/extract_frames.py "
+                    f"--video <your_video.mp4> --out_dir {frames_path}"
+                )
+            raise RuntimeError(
+                f"Frames directory is empty: {frames_path}\n"
+                f"Run first:  python benchmarks/extract_frames.py "
+                f"--video <your_video.mp4> --out_dir {frames_path}"
+            )
+
         if self.frames_dir.exists() and not force:
-            existing_frames = list(self.frames_dir.glob("*.jpg"))
-            if existing_frames:
-                print(f"Using existing frames: {self.frames_dir}")
+            jpg_files = list(self.frames_dir.glob("*.jpg"))
+            if jpg_files:
+                print(f"Using existing frames ({len(jpg_files)} files): {self.frames_dir}")
                 return self.frames_dir
-        
-        self.frames_dir.mkdir(parents=True, exist_ok=True)
-        
+
         if not self.config.video_path:
-            raise ValueError("video_path required for frame extraction")
-        
+            raise ValueError(
+                "No frames found and no video provided.\n"
+                "Supply --frames_dir (pre-extracted) or --video_path to extract automatically."
+            )
+
         video_path = Path(self.config.video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
-        
+
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nExtracting frames from: {video_path}")
-        
-        from benchmarks.extract_frames import extract_frames
-        
-        meta = extract_frames(
+
+        from benchmarks.extract_frames import extract_frames as _extract
+
+        meta = _extract(
             video_path=video_path,
             out_dir=self.frames_dir,
             stride=self.config.stride,
             max_frames=self.config.max_frames,
             resize_width=self.config.resize_width,
-            resize_height=self.config.resize_height
+            resize_height=self.config.resize_height,
         )
-        
         print(f"Extracted {meta['extracted_frames']} frames")
         return self.frames_dir
     
     def run_mediapipe_benchmark(self) -> Dict[str, Any]:
-        """Run MediaPipe benchmark"""
         if not self.config.run_mediapipe:
             return None
         
@@ -149,17 +133,19 @@ class UnifiedBenchmarkRunner:
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from benchmarks.run_mediapipe_on_frames import run
         
+        _complexity_map = {"lite": 0, "full": 1, "heavy": 2}
+        model_complexity = _complexity_map.get(self.config.mediapipe_model, 1)
+
         result = run(
             frames_dir=self.frames_dir,
-            output_json=output_json,
-            model=self.config.mediapipe_model,
+            out_json=output_json,
+            model_complexity=model_complexity,
             max_frames=self.config.max_frames
         )
         
         return result
     
     def run_movenet_benchmark(self) -> Dict[str, Any]:
-        """Run MoveNet benchmark"""
         if not self.config.run_movenet:
             return None
         
@@ -180,13 +166,13 @@ class UnifiedBenchmarkRunner:
         result = run(
             frames_dir=self.frames_dir,
             out_json=output_json,
-            model=self.config.movenet_model
+            model=self.config.movenet_model,
+            max_frames=self.config.max_frames
         )
         
         return result
     
     def run_posenet_benchmark(self) -> Dict[str, Any]:
-        """Run PoseNet benchmark (Node.js)"""
         if not self.config.run_posenet:
             return None
         
@@ -224,7 +210,6 @@ class UnifiedBenchmarkRunner:
             return json.load(f)
     
     def _compare_results(self) -> Dict[str, Any]:
-        """Compare results across frameworks"""
         summary = {}
         
         for name in ["mediapipe", "posenet", "movenet"]:
@@ -255,7 +240,6 @@ class UnifiedBenchmarkRunner:
         return summary
     
     def run_all_benchmarks(self) -> BenchmarkResults:
-        """Run all configured benchmarks"""
         start_time = time.time()
         
         print(f"\n{'#'*70}")
@@ -274,14 +258,13 @@ class UnifiedBenchmarkRunner:
         
         self.results.comparison_summary = self._compare_results()
         self.results.total_duration_s = time.time() - start_time
-        self.results.frames_processed = len(list(self.frames_dir.glob("*.jpg")))
+        self.results.frames_processed = len(list(self.frames_dir.glob('*.jpg')))
         
         self._save_results()
         
         return self.results
     
     def _save_results(self):
-        """Save final benchmark results"""
         output_path = self.session_dir / "benchmark_summary.json"
         
         with open(output_path, 'w') as f:
@@ -301,7 +284,6 @@ class UnifiedBenchmarkRunner:
                     print(f"  {key}: {value}")
     
     def print_summary(self):
-        """Print formatted results summary"""
         print(f"\n{'='*70}")
         print(f"BENCHMARK RESULTS: {self.config.session_name}")
         print(f"{'='*70}")
@@ -322,7 +304,6 @@ class UnifiedBenchmarkRunner:
 
 
 def run_from_config(config: BenchmarkConfig) -> BenchmarkResults:
-    """Convenience function to run benchmark from config"""
     runner = UnifiedBenchmarkRunner(config)
     
     runner.extract_frames()
