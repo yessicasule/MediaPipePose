@@ -1,65 +1,97 @@
-# Dependency directories
-**/node_modules/
-**/.venv/
-**/env/
-**/venv/
-**/ENV/
-**/bin/
-**/lib/
-**/share/
-**/Include/
-
-# Python Cache
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+
+# virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+MANIFEST
+
+# test / lint caches
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .tox/
 .nox/
+.ruff_cache/
 
-# System Files
-.DS_Store
-Thumbs.db
-desktop.ini
+# Jupyter
+.ipynb_checkpoints/
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
+# ── Node / npm ─────────────────────────────────────────────────────────────────
+node_modules/
+package-lock.json
+yarn.lock
+.npm/
+.yarn/
+*.tsbuildinfo
 
-# Project specific
-PoseTrack/outputs/
-PoseTrack/data/
-*.log
-**/frames/
-
-# Benchmark cache
-PoseTrack/benchmarks/results/
-
-# Models (downloadable)
+# ── TensorFlow / ML ───────────────────────────────────────────────────────────
+*.h5
+*.pb
+*.tflite
+*.ckpt
+*.ckpt.*
+saved_model/
+tf_data/
+tensorflow_datasets/
 PoseTrack/models/
 
-# Legacy (unused)
+# ── Project data & outputs ────────────────────────────────────────────────────
+PoseTrack/data/
+PoseTrack/outputs/
+PoseTrack/benchmarks/results/
+**/frames/
+
+# legacy
 PoseTrack/legacy/
 
-# Unity
+# ── Unity ─────────────────────────────────────────────────────────────────────
+# Generated — never commit these
 [Ll]ibrary/
 [Ll]ogs/
 [Oo]bj/
 [Tt]emp/
 [Uu]ser[Ss]ettings/
-Packages/
-ProjectSettings/
-*.inputactions
-*.wlt
-*.asset
-*.prefab
-*.controller
+*.csproj
+*.sln
+*.pidb
+*.booproj
+*.suo
 *.unitypackage
-*.meta
-*.unity
+
+# Auto-imported Unity packages — re-downloaded on first open, do not commit
+**/Assets/TextMesh Pro/
+**/Assets/TextMesh Pro.meta
+
+# Large binary assets — use Git LFS or keep local
 *.fbx
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml

@@ -1,5 +1,8 @@
 import numpy as np
 import math
+from collections import namedtuple
+
+Vec3 = namedtuple('Vec3', ['x', 'y', 'z'])
 
 SHOULDER = 11
 ELBOW    = 13
@@ -20,6 +23,12 @@ def _unit(v):
 def _angle_between(u, v):
     cos_a = np.clip(np.dot(_unit(u), _unit(v)), -1.0, 1.0)
     return float(np.degrees(np.arccos(cos_a)))
+
+def elbow_flexion_deg(shoulder, elbow, wrist) -> float:
+    """Compute elbow flexion from three Vec3 (or any x/y/z) points."""
+    upper_arm = _vec(shoulder, elbow)
+    forearm   = _vec(elbow, wrist)
+    return 180.0 - _angle_between(upper_arm, forearm)
 
 def compute_elbow_flexion(landmarks) -> float:
     upper_arm = _vec(landmarks[SHOULDER], landmarks[ELBOW])

@@ -1,10 +1,13 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from src.angles import Vec3, elbow_flexion_deg
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.processing.joint_angle_estimator import Vec3, elbow_flexion_deg
+from src.evaluation.metrics import compute_jitter, compute_static_pose_stability, compute_fps
 
 
 # Common joints (COCO-style names). We map each framework to these.
@@ -172,27 +175,39 @@ def evaluate(res: dict, min_score: float, static_first_n: int) -> dict:
                 ok += 1
         return ok / total if total else float("nan")
 
+    n_frames = int(res.get("n_frames", len(pf)))
+    wall_s   = float(res.get("wall_elapsed_s", 0.0))
+
+    # Use metrics.py for angle-domain jitter and static stability
+    left_angle_jitter  = compute_jitter(left_angles.tolist())
+    right_angle_jitter = compute_jitter(right_angles.tolist())
+    left_static_std    = compute_static_pose_stability(left_static.tolist())
+    right_static_std   = compute_static_pose_stability(right_static.tolist())
+    fps_verified       = compute_fps(n_frames, wall_s) if wall_s > 0 else float(res.get("fps", 0.0))
+
     out = {
         "library": res.get("library"),
         "framework": res.get("framework"),
-        "fps": float(res.get("fps", 0.0)),
+        "fps": fps_verified,
         "latency_ms_mean": float(res.get("latency_ms", {}).get("mean", float("nan"))),
         "avg_keypoint_score_mean": float(res.get("avg_keypoint_score", {}).get("mean", float("nan"))),
         "jitter": {
-            "left_elbow_mean_step": left_elbow_jitter,
-            "right_elbow_mean_step": right_elbow_jitter,
+            "left_elbow_xy_mean_step":    left_elbow_jitter,
+            "right_elbow_xy_mean_step":   right_elbow_jitter,
+            "left_elbow_angle_mean_step":  left_angle_jitter,
+            "right_elbow_angle_mean_step": right_angle_jitter,
         },
         "elbow_angle": {
-            "left_deg_mean": float(np.nanmean(left_angles)) if left_angles.size else float("nan"),
-            "left_deg_std_static": float(np.nanstd(left_static)) if left_static.size else float("nan"),
-            "right_deg_mean": float(np.nanmean(right_angles)) if right_angles.size else float("nan"),
-            "right_deg_std_static": float(np.nanstd(right_static)) if right_static.size else float("nan"),
+            "left_deg_mean":       float(np.nanmean(left_angles))  if left_angles.size  else float("nan"),
+            "left_deg_std_static": left_static_std,
+            "right_deg_mean":      float(np.nanmean(right_angles)) if right_angles.size else float("nan"),
+            "right_deg_std_static": right_static_std,
         },
         "robustness": {
-            "left_arm_confident_fraction": robust_fraction("left"),
+            "left_arm_confident_fraction":  robust_fraction("left"),
             "right_arm_confident_fraction": robust_fraction("right"),
         },
-        "n_frames": int(res.get("n_frames", len(pf))),
+        "n_frames": n_frames,
     }
     return out
 

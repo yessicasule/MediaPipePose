@@ -16,7 +16,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run Real-Time Pose Estimation to Unity")
     parser.add_argument("--host", default=Config.UDP_IP, help="UDP Host IP")
     parser.add_argument("--port", type=int, default=Config.UDP_PORT, help="UDP Port")
-    parser.add_argument("--filter", default="kalman", choices=["ema", "kalman"], help="Filter type")
+    parser.add_argument("--filter", default="kalman", choices=["kalman", "ema", "ma", "sg"],
+                        help="Filter type: kalman (default), ema, ma (moving average), sg (Savitzky-Golay)")
     parser.add_argument("--camera", type=int, default=Config.CAMERA_ID, help="Camera ID")
     parser.add_argument("--video", type=str, default=None, help="Optional video file instead of camera")
     args = parser.parse_args()
@@ -60,9 +61,18 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.FRAME_HEIGHT)
 
+    # MSMF on Windows reports isOpened() = True before the hardware is ready.
+    # Drain a few frames and add a short delay so the first real read succeeds.
+    if not args.video:
+        print("Warming up camera...")
+        for _ in range(10):
+            cap.read()
+        time.sleep(0.5)
+
     streamer.start()
 
     print("Pipeline running. Press 'q' to stop.")
+    consecutive_failures = 0
 
     try:
         while True:
@@ -71,8 +81,13 @@ def main():
                 if args.video:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                else:
+                consecutive_failures += 1
+                if consecutive_failures >= 30:
+                    print("Error: Camera stopped delivering frames. Check that no other app took over the camera.")
                     break
+                time.sleep(0.033)
+                continue
+            consecutive_failures = 0
 
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             landmarks = pose_runner.process(image_rgb)

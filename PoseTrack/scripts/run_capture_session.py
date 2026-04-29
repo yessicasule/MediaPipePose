@@ -206,7 +206,8 @@ def main():
     ap.add_argument("--camera", type=int, default=Config.CAMERA_ID)
     ap.add_argument("--host", default=Config.UDP_IP)
     ap.add_argument("--port", type=int, default=Config.UDP_PORT)
-    ap.add_argument("--filter", default="kalman", choices=["ema", "kalman"])
+    ap.add_argument("--filter", default="kalman", choices=["kalman", "ema", "ma", "sg"],
+                    help="Filter type: kalman (default), ema, ma (moving average), sg (Savitzky-Golay)")
     ap.add_argument("--no_stream", action="store_true", help="Disable UDP streaming to Unity")
     ap.add_argument("--save_landmarks", action="store_true", help="Save all 33 MediaPipe keypoints per frame")
     ap.add_argument("--calib", type=str, default=None, help="Load calibration JSON before starting")
@@ -228,6 +229,12 @@ def main():
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+
+    print("Warming up camera...")
+    for _ in range(10):
+        cap.read()
+    time.sleep(0.5)
+
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"Resolution: {actual_w}x{actual_h}")
@@ -273,6 +280,7 @@ def main():
     frame_index = 0
     session_t0 = time.perf_counter()
     fps_window = []
+    consecutive_failures = 0
 
     rolling_plot = _RollingPlot()
 
@@ -286,8 +294,13 @@ def main():
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Camera read failed — stopping.")
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= 30:
+                    print("Camera read failed repeatedly — stopping.")
+                    break
+                time.sleep(0.033)
+                continue
+            consecutive_failures = 0
 
             t_unix = time.time()
             elapsed = time.perf_counter() - session_t0
