@@ -7,11 +7,9 @@ Real-time upper-body pose tracking from a single RGB camera. Computes shoulder a
 ## Installation
 
 ```bash
-cd PoseTrack
-
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
+python -m venv PoseTrack/.venv
+PoseTrack\.venv\Scripts\activate          # Windows
+# source PoseTrack/.venv/bin/activate     # macOS / Linux
 
 pip install opencv-python mediapipe numpy tensorflow tensorflow-hub
 pip install matplotlib scipy pillow psutil
@@ -19,12 +17,12 @@ pip install matplotlib scipy pillow psutil
 
 PoseNet benchmark only (requires Node.js):
 ```bash
-cd benchmarks/posenet_tfjs
+cd PoseTrack/benchmarks/posenet_tfjs
 npm install
-cd ../..
+cd ../../..
 ```
 
-All commands below are run from the `PoseTrack/` directory.
+All commands below are run from the repo root (`D:\MediaPipePose`).
 
 ---
 
@@ -52,7 +50,7 @@ The Unity project is already configured at `Unity/UnityMedia/`.
 Reads the camera, estimates pose, filters angles, streams to Unity at 30 Hz.
 
 ```bash
-python scripts/run_live.py
+python PoseTrack/scripts/run_live.py
 ```
 
 Options:
@@ -76,7 +74,7 @@ Press `q` to stop.
 Records video and logs joint angles frame-by-frame. Use this for data collection, analysis, and benchmarking. Also streams to Unity at the same time.
 
 ```bash
-python scripts/run_capture_session.py --session arm_test_01
+python PoseTrack/scripts/run_capture_session.py --session arm_test_01
 ```
 
 Options:
@@ -101,7 +99,7 @@ Options:
 | `SPACE` | Capture the current calibration pose |
 | `q` / `ESC` | Stop, save all files, generate plots |
 
-**Output** — saved to `data/sessions/arm_test_01/`:
+**Output** — saved to `PoseTrack/data/sessions/arm_test_01/`:
 
 ```
 raw.mp4                          raw camera recording
@@ -128,8 +126,8 @@ Four filter options are available across all scripts that accept `--filter`:
 | `sg` | Savitzky-Golay, window = 11, order = 3 | Preserves motion peaks, requires `scipy` |
 
 ```bash
-python scripts/run_live.py --filter sg
-python scripts/run_capture_session.py --session test_01 --filter ema
+python PoseTrack/scripts/run_live.py --filter sg
+python PoseTrack/scripts/run_capture_session.py --session test_01 --filter ema
 ```
 
 To compare filters, run two separate capture sessions with different `--filter` values, then use `plot_angles.py` to overlay the resulting CSVs.
@@ -149,11 +147,11 @@ Maps your neutral arm position to the avatar's coordinate frame. Run during any 
 7. Press `SPACE`
 8. Bend your elbow to 90°
 9. Press `c` — prompted for `elbow_flexed`
-10. Press `SPACE` — calibration finalised, saved to `data/sessions/arm_test_01/calibration.json`
+10. Press `SPACE` — calibration finalised, saved to `PoseTrack/data/sessions/arm_test_01/calibration.json`
 
 Reload in future sessions:
 ```bash
-python scripts/run_capture_session.py --session arm_test_02 --calib data/sessions/arm_test_01/calibration.json
+python PoseTrack/scripts/run_capture_session.py --session arm_test_02 --calib PoseTrack/data/sessions/arm_test_01/calibration.json
 ```
 
 ---
@@ -163,8 +161,8 @@ python scripts/run_capture_session.py --session arm_test_02 --calib data/session
 Auto-generated on capture session exit. Re-run manually at any time:
 
 ```bash
-python scripts/plot_angles.py \
-    --csv  data/sessions/arm_test_01/angles.csv \
+python PoseTrack/scripts/plot_angles.py \
+    --csv  PoseTrack/data/sessions/arm_test_01/angles.csv \
     --comparison \
     --show
 ```
@@ -187,7 +185,7 @@ Output:
 Sends synthetic angle values over UDP. Use this to test Unity bone assignment and axis offsets without a camera.
 
 ```bash
-python scripts/data_generator.py --mode wave --hz 30
+python PoseTrack/scripts/data_generator.py --mode wave --hz 30
 ```
 
 | Flag | Default | Description |
@@ -207,15 +205,15 @@ Runs MediaPipe, MoveNet, and PoseNet on the same recorded frames for a fair side
 ### Step 1 — Capture a session
 
 ```bash
-python scripts/run_capture_session.py --session benchmark_01 --save_landmarks --no_stream
+python PoseTrack/scripts/run_capture_session.py --session benchmark_01 --save_landmarks --no_stream
 ```
 
 ### Step 2 — Extract frames from the video
 
 ```bash
-python benchmarks/extract_frames.py \
-    --video   data/sessions/benchmark_01/raw.mp4 \
-    --out_dir data/sessions/benchmark_01/frames
+python PoseTrack/benchmarks/extract_frames.py \
+    --video   PoseTrack/data/sessions/benchmark_01/raw.mp4 \
+    --out_dir PoseTrack/data/sessions/benchmark_01/frames
 ```
 
 Optional flags: `--stride 2` (keep every 2nd frame), `--max_frames 300`
@@ -224,29 +222,29 @@ Optional flags: `--stride 2` (keep every 2nd frame), `--max_frames 300`
 
 **All at once (MediaPipe + MoveNet, skips PoseNet):**
 ```bash
-python benchmarks/run_all_benchmarks.py \
+python PoseTrack/benchmarks/run_all_benchmarks.py \
     --session_name benchmark_01 \
-    --frames_dir   data/sessions/benchmark_01/frames \
+    --frames_dir   PoseTrack/data/sessions/benchmark_01/frames \
     --no-posenet
 ```
 
 **Or individually:**
 ```bash
-python benchmarks/run_mediapipe_on_frames.py \
-    --frames_dir data/sessions/benchmark_01/frames \
-    --out_json   data/sessions/benchmark_01/results/mediapipe.json
+python PoseTrack/benchmarks/run_mediapipe_on_frames.py \
+    --frames_dir PoseTrack/data/sessions/benchmark_01/frames \
+    --out_json   PoseTrack/data/sessions/benchmark_01/results/mediapipe.json
 
-python benchmarks/run_movenet_on_frames.py \
-    --frames_dir data/sessions/benchmark_01/frames \
-    --out_json   data/sessions/benchmark_01/results/movenet.json \
+python PoseTrack/benchmarks/run_movenet_on_frames.py \
+    --frames_dir PoseTrack/data/sessions/benchmark_01/frames \
+    --out_json   PoseTrack/data/sessions/benchmark_01/results/movenet.json \
     --model      lightning
 ```
 
 **PoseNet (requires Node.js):**
 ```bash
-node benchmarks/posenet_tfjs/run_posenet_on_frames.mjs \
-    --frames_dir data/sessions/benchmark_01/frames \
-    --out_json   data/sessions/benchmark_01/results/posenet.json
+node PoseTrack/benchmarks/posenet_tfjs/run_posenet_on_frames.mjs \
+    --frames_dir PoseTrack/data/sessions/benchmark_01/frames \
+    --out_json   PoseTrack/data/sessions/benchmark_01/results/posenet.json
 ```
 
 ### Step 4 — Evaluate frameworks
@@ -254,10 +252,10 @@ node benchmarks/posenet_tfjs/run_posenet_on_frames.mjs \
 Computes per-framework: FPS, latency, keypoint jitter (XY and angle-domain), static pose stability, and arm detection robustness.
 
 ```bash
-python benchmarks/evaluate_frameworks.py \
-    --results data/sessions/benchmark_01/results/mediapipe.json \
-              data/sessions/benchmark_01/results/movenet.json \
-    --out_json data/sessions/benchmark_01/results/evaluation.json \
+python PoseTrack/benchmarks/evaluate_frameworks.py \
+    --results PoseTrack/data/sessions/benchmark_01/results/mediapipe.json \
+              PoseTrack/data/sessions/benchmark_01/results/movenet.json \
+    --out_json PoseTrack/data/sessions/benchmark_01/results/evaluation.json \
     --min_score 0.3 \
     --static_first_n 60
 ```
@@ -265,13 +263,13 @@ python benchmarks/evaluate_frameworks.py \
 ### Step 5 — Visualise results
 
 ```bash
-python benchmarks/visualize_benchmarks.py \
-    --results_dir data/sessions/benchmark_01/results \
-    --frames_dir  data/sessions/benchmark_01/frames \
-    --output_dir  data/sessions/benchmark_01/plots
+python PoseTrack/benchmarks/visualize_benchmarks.py \
+    --results_dir PoseTrack/data/sessions/benchmark_01/results \
+    --frames_dir  PoseTrack/data/sessions/benchmark_01/frames \
+    --output_dir  PoseTrack/data/sessions/benchmark_01/plots
 ```
 
-Output in `data/sessions/benchmark_01/plots/`:
+Output in `PoseTrack/data/sessions/benchmark_01/plots/`:
 
 ```
 latency_comparison.png       per-frame latency traces + histogram
@@ -284,11 +282,11 @@ benchmark_report.txt         plain-text summary table
 ### Step 6 — Render side-by-side skeleton video
 
 ```bash
-python benchmarks/render_comparison_video.py \
-    --frames_dir data/sessions/benchmark_01/frames \
-    --mediapipe  data/sessions/benchmark_01/results/mediapipe.json \
-    --movenet    data/sessions/benchmark_01/results/movenet.json \
-    --out        outputs/comparison_benchmark_01.mp4
+python PoseTrack/benchmarks/render_comparison_video.py \
+    --frames_dir PoseTrack/data/sessions/benchmark_01/frames \
+    --mediapipe  PoseTrack/data/sessions/benchmark_01/results/mediapipe.json \
+    --movenet    PoseTrack/data/sessions/benchmark_01/results/movenet.json \
+    --out        PoseTrack/outputs/comparison_benchmark_01.mp4
 ```
 
 Left panel: MediaPipe skeleton. Right panel: MoveNet skeleton. Per-frame latency and confidence shown in the header.
@@ -349,7 +347,7 @@ MSMF on Windows sometimes needs a moment to warm up. The scripts already handle 
 - Use `--filter kalman` (default)
 - Improve lighting — shadows on elbow/shoulder confuse MediaPipe
 - Keep full upper body (head to hips) in frame
-- Increase `measurement_noise` in `KalmanFilter1D` in `src/processing/angle_filter.py` for more smoothing at the cost of lag
+- Increase `measurement_noise` in `KalmanFilter1D` in `PoseTrack/src/processing/angle_filter.py` for more smoothing at the cost of lag
 - SG filter (`--filter sg`) may help if motion has sharp peaks — requires `pip install scipy`
 
 **`evaluate_frameworks.py` or `visualize_benchmarks.py` crash**

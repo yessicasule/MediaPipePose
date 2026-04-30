@@ -5,7 +5,10 @@
       "Bash(python scripts/run_live.py --filter kalman)",
       "Bash(python -c ' *)",
       "Read(//c/Users/yessi/AppData/Local/Programs/Python/Python310/lib/site-packages/mediapipe/tasks/python/core/**)",
-      "Read(//d/d/MediaPipePose/PoseTrack/data/sessions/**)"
+      "Read(//d/d/MediaPipePose/PoseTrack/data/sessions/**)",
+      "Bash(pip --version)",
+      "PowerShell(D:\\\\MediaPipePose\\\\.venv\\\\Scripts\\\\pip.exe install -r D:\\\\MediaPipePose\\\\PoseTrack\\\\requirements.txt scipy 2>&1)",
+      "PowerShell(D:\\\\MediaPipePose\\\\.venv\\\\Scripts\\\\python.exe -c \"import mediapipe, cv2, tensorflow, scipy, pandas; print\\('All OK'\\)\" 2>&1)"
     ]
   }
 }
