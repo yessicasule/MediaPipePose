@@ -39,22 +39,79 @@ def _system_info() -> dict:
     return info
 
 
-def run(frames_dir: Path, out_json: Path, model_complexity: int, max_frames: int | None) -> dict:
+def _make_pose_fn(model_complexity: int):
+    """Returns (detector, process_fn) that works on both mediapipe <0.10.35 (solutions) and 0.10.35+ (tasks)."""
     import mediapipe as mp
 
+    # --- try legacy solutions API ---
+    try:
+        try:
+            import mediapipe.python.solutions.pose as _pose_mod
+        except ModuleNotFoundError:
+            import importlib
+            _pose_mod = importlib.import_module("mediapipe.solutions.pose")
+
+        detector = _pose_mod.Pose(
+            static_image_mode=True,
+            model_complexity=model_complexity,
+            smooth_landmarks=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
+        def _process(rgb):
+            res = detector.process(rgb)
+            if res.pose_landmarks:
+                return np.array([[lm.x, lm.y, lm.visibility] for lm in res.pose_landmarks.landmark], dtype=float)
+            return None
+
+        return detector, _process
+
+    except Exception:
+        pass
+
+    # --- fall back to Tasks API (mediapipe 0.10.35+) ---
+    import urllib.request
+    from mediapipe.tasks.python import vision
+    from mediapipe.tasks.python.core.base_options import BaseOptions
+
+    model_path = Path(__file__).resolve().parent.parent / "src" / "pose" / "models" / "pose_landmarker_lite.task"
+    if not model_path.exists():
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        print("Downloading MediaPipe pose model ...")
+        urllib.request.urlretrieve(
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+            "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+            model_path,
+        )
+
+    detector = vision.PoseLandmarker.create_from_options(
+        vision.PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=str(model_path)),
+            running_mode=vision.RunningMode.IMAGE,
+            min_pose_detection_confidence=0.5,
+        )
+    )
+
+    def _process(rgb):
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = detector.detect(mp_img)
+        if result.pose_landmarks:
+            lms = result.pose_landmarks[0]
+            return np.array([[lm.x, lm.y, getattr(lm, "visibility", 1.0)] for lm in lms], dtype=float)
+        return None
+
+    return detector, _process
+
+
+def run(frames_dir: Path, out_json: Path, model_complexity: int, max_frames: int | None) -> dict:
     frames = sorted(frames_dir.glob("*.jpg"))
     if not frames:
         raise RuntimeError(f"No .jpg frames found in: {frames_dir}")
     if max_frames is not None:
         frames = frames[:max_frames]
 
-    pose = mp.solutions.pose.Pose(
-        static_image_mode=True,
-        model_complexity=model_complexity,
-        smooth_landmarks=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    pose, process_fn = _make_pose_fn(model_complexity)
 
     per_frame: list[dict] = []
     latencies: list[float] = []
@@ -64,11 +121,10 @@ def run(frames_dir: Path, out_json: Path, model_complexity: int, max_frames: int
     for i, fp in enumerate(frames):
         rgb = _load_image_rgb_uint8(fp)
         t0 = time.perf_counter()
-        res = pose.process(rgb)
+        kps = process_fn(rgb)
         dt_ms = (time.perf_counter() - t0) * 1000.0
 
-        if res.pose_landmarks:
-            kps = np.array([[lm.x, lm.y, lm.visibility] for lm in res.pose_landmarks.landmark], dtype=float)
+        if kps is not None:
             mean_score = float(np.mean(kps[:, 2]))
             kps_list = kps.tolist()
         else:

@@ -8,7 +8,9 @@
       "Read(//d/d/MediaPipePose/PoseTrack/data/sessions/**)",
       "Bash(pip --version)",
       "PowerShell(D:\\\\MediaPipePose\\\\.venv\\\\Scripts\\\\pip.exe install -r D:\\\\MediaPipePose\\\\PoseTrack\\\\requirements.txt scipy 2>&1)",
-      "PowerShell(D:\\\\MediaPipePose\\\\.venv\\\\Scripts\\\\python.exe -c \"import mediapipe, cv2, tensorflow, scipy, pandas; print\\('All OK'\\)\" 2>&1)"
+      "PowerShell(D:\\\\MediaPipePose\\\\.venv\\\\Scripts\\\\python.exe -c \"import mediapipe, cv2, tensorflow, scipy, pandas; print\\('All OK'\\)\" 2>&1)",
+      "Bash(Get-Content \"C:\\\\Users\\\\yessi\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--MediaPipePose\\\\59ccce3f-752c-424c-8f18-5df7516c4c96\\\\tasks\\\\bwy7kceby.output\" -Wait)",
+      "PowerShell(python -c \"import mediapipe; print\\(mediapipe.__version__\\); import pkgutil; print\\([m.name for m in pkgutil.iter_modules\\(mediapipe.__path__\\)]\\)\" 2>&1)"
     ]
   }
 }
