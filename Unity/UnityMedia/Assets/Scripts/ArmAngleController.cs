@@ -41,28 +41,38 @@ namespace PoseTrackReceiver
 
         void Update()
         {
-            if (!_receiver.HasData) return;
+            // Driven by UdpAngleReceiver when used standalone
+            if (_receiver != null && _receiver.HasData)
+            {
+                var a = _receiver.Latest;
+                ApplyAngles(a.shoulderPitch, a.shoulderRoll, a.shoulderYaw, a.elbowFlex);
+            }
+        }
 
-            var a = _receiver.Latest;   // struct copy — no alloc
-
-            float pitch = _smPitch.Update(a.shoulderPitch);
-            float yaw   = _smYaw  .Update(a.shoulderYaw);
-            float roll  = _smRoll .Update(a.shoulderRoll);
-            float elbow = _smElbow.Update(a.elbowFlex);
+        /// <summary>
+        /// Public entry-point used by MultiAvatarManager to drive this avatar directly.
+        /// Applies smoothing and axis offsets before writing to bones.
+        /// </summary>
+        public void ApplyAngles(float pitch, float roll, float yaw, float elbow)
+        {
+            float sPitch = _smPitch.Update(pitch);
+            float sRoll  = _smRoll .Update(roll);
+            float sYaw   = _smYaw  .Update(yaw);
+            float sElbow = _smElbow.Update(elbow);
 
             if (upperArmBone != null)
             {
-                _shoulderEuler.x = pitch + shoulderAxisOffset.x;
-                _shoulderEuler.y = yaw   + shoulderAxisOffset.y;
-                _shoulderEuler.z = roll  + shoulderAxisOffset.z;
+                _shoulderEuler.x = sPitch + shoulderAxisOffset.x;
+                _shoulderEuler.y = sYaw   + shoulderAxisOffset.y;
+                _shoulderEuler.z = sRoll  + shoulderAxisOffset.z;
                 upperArmBone.localRotation = Quaternion.Euler(_shoulderEuler);
             }
 
             if (lowerArmBone != null)
             {
-                _elbowEuler.x = elbow + elbowAxisOffset.x;
-                _elbowEuler.y =         elbowAxisOffset.y;
-                _elbowEuler.z =         elbowAxisOffset.z;
+                _elbowEuler.x = sElbow + elbowAxisOffset.x;
+                _elbowEuler.y =          elbowAxisOffset.y;
+                _elbowEuler.z =          elbowAxisOffset.z;
                 lowerArmBone.localRotation = Quaternion.Euler(_elbowEuler);
             }
         }

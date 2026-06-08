@@ -1,3 +1,13 @@
+// UdpAngleReceiver.cs — Phase 8 update: receives 4-stream multi-avatar packets.
+//
+// Packet prefixes:
+//   MP,<pitch>,<roll>,<yaw>,<elbow>
+//   MV,<pitch>,<roll>,<yaw>,<elbow>
+//   FU,<pitch>,<roll>,<yaw>,<elbow>,<uncertainty>
+//   GR,<pitch>,<roll>,<yaw>,<elbow>
+//
+// Legacy S, prefix still supported for backward compatibility.
+
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -18,17 +28,25 @@ namespace PoseTrackReceiver
             public float shoulderYaw;
             public float shoulderRoll;
             public float elbowFlex;
+            public float uncertainty;   // only populated for FU prefix
         }
 
-        public ArmAngles Latest { get; private set; }
-        public bool HasData    { get; private set; }
+        // Latest data per source
+        public ArmAngles Latest_MP { get; private set; }
+        public ArmAngles Latest_MV { get; private set; }
+        public ArmAngles Latest_FU { get; private set; }
+        public ArmAngles Latest_GR { get; private set; }
+        public ArmAngles Latest    { get; private set; }  // legacy
+
+        public bool HasData { get; private set; }
 
         UdpClient    _client;
         Thread       _thread;
         volatile bool _running;
-        readonly object _lock = new();
-        ArmAngles    _pending;
-        bool         _pendingReady;
+
+        readonly object  _lock = new();
+        ArmAngles _pendingMP, _pendingMV, _pendingFU, _pendingGR, _pendingLegacy;
+        bool      _readyMP,   _readyMV,   _readyFU,   _readyGR,   _readyLegacy;
 
         void OnEnable()
         {
@@ -49,10 +67,11 @@ namespace PoseTrackReceiver
         {
             lock (_lock)
             {
-                if (!_pendingReady) return;
-                Latest       = _pending;
-                HasData      = true;
-                _pendingReady = false;
+                if (_readyMP)    { Latest_MP  = _pendingMP;  _readyMP    = false; HasData = true; }
+                if (_readyMV)    { Latest_MV  = _pendingMV;  _readyMV    = false; HasData = true; }
+                if (_readyFU)    { Latest_FU  = _pendingFU;  _readyFU    = false; HasData = true; }
+                if (_readyGR)    { Latest_GR  = _pendingGR;  _readyGR    = false; HasData = true; }
+                if (_readyLegacy){ Latest      = _pendingLegacy; _readyLegacy = false; HasData = true; }
             }
         }
 
@@ -65,9 +84,33 @@ namespace PoseTrackReceiver
                 {
                     byte[] data = _client.Receive(ref ep);
                     string line = Encoding.UTF8.GetString(data).Trim();
-                    if (TryParse(line, out ArmAngles a))
+                    if (string.IsNullOrEmpty(line)) continue;
+
+                    string prefix = line.Length >= 2 ? line.Substring(0, 2) : "";
+                    string body   = line.Length > 3   ? line.Substring(3)   : "";
+
+                    lock (_lock)
                     {
-                        lock (_lock) { _pending = a; _pendingReady = true; }
+                        switch (prefix)
+                        {
+                            case "MP":
+                                if (TryParse4(body, out ArmAngles mp))  { _pendingMP  = mp; _readyMP  = true; }
+                                break;
+                            case "MV":
+                                if (TryParse4(body, out ArmAngles mv))  { _pendingMV  = mv; _readyMV  = true; }
+                                break;
+                            case "FU":
+                                if (TryParse5(body, out ArmAngles fu))  { _pendingFU  = fu; _readyFU  = true; }
+                                break;
+                            case "GR":
+                                if (TryParse4(body, out ArmAngles gr))  { _pendingGR  = gr; _readyGR  = true; }
+                                break;
+                            default:
+                                // Legacy "S," format
+                                if (line.StartsWith("S,") && TryParse4(line.Substring(2), out ArmAngles leg))
+                                { _pendingLegacy = leg; _readyLegacy = true; }
+                                break;
+                        }
                     }
                 }
                 catch (SocketException) { }
@@ -75,21 +118,31 @@ namespace PoseTrackReceiver
             }
         }
 
-        static bool TryParse(string line, out ArmAngles a)
+        static bool TryParse4(string body, out ArmAngles a)
         {
             a = default;
-            if (!line.StartsWith("S,")) return false;
-            string[] parts = line.Split(',');
-            if (parts.Length < 5) return false;
-            if (!float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float sp)) return false;
-            if (!float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float sy)) return false;
-            if (!float.TryParse(parts[3], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float sr)) return false;
-            if (!float.TryParse(parts[4], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float ef)) return false;
-            a = new ArmAngles { shoulderPitch = sp, shoulderYaw = sy, shoulderRoll = sr, elbowFlex = ef };
+            string[] p = body.Split(',');
+            if (p.Length < 4) return false;
+            if (!float.TryParse(p[0], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float v0)) return false;
+            if (!float.TryParse(p[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float v1)) return false;
+            if (!float.TryParse(p[2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float v2)) return false;
+            if (!float.TryParse(p[3], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float v3)) return false;
+            a = new ArmAngles { shoulderPitch = v0, shoulderRoll = v1, shoulderYaw = v2, elbowFlex = v3 };
+            return true;
+        }
+
+        static bool TryParse5(string body, out ArmAngles a)
+        {
+            a = default;
+            if (!TryParse4(body, out a)) return false;
+            string[] p = body.Split(',');
+            if (p.Length >= 5 && float.TryParse(p[4], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float unc))
+                a.uncertainty = unc;
             return true;
         }
     }
