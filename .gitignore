@@ -95,3 +95,7 @@ desktop.ini
 .vscode/
 .idea/
 *.iml
+
+# Claude Agent Files
+.claude/
+claude.md
