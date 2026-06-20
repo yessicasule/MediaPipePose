@@ -66,16 +66,7 @@ class KalmanFilter1D:
 
 
 class SavitzkyGolayFilter:
-    """
-    Real-time (causal) Savitzky-Golay filter.
-
-    Buffers the last `window_length` samples and fits a polynomial of degree
-    `polyorder` to them each frame, returning the filtered value at the most
-    recent point.  Until the buffer fills, raw values are returned so the
-    pipeline starts immediately without a forced delay.
-
-    Requires scipy.  Falls back silently to raw values if scipy is absent.
-    """
+    """Causal SG filter; returns raw values until the buffer fills. Requires scipy."""
 
     def __init__(self, window_length: int = 11, polyorder: int = 3):
         if window_length % 2 == 0:
@@ -100,13 +91,7 @@ class SavitzkyGolayFilter:
 
 
 class AngleFilterSystem:
-    """
-    Per-joint filter bank.  Supported filter_type values:
-        "kalman"  — 1-D Kalman filter (default, best for real-time)
-        "ema"     — Exponential moving average
-        "ma"      — Simple moving average
-        "sg"      — Savitzky-Golay (requires scipy)
-    """
+    """Per-joint filter bank. filter_type: 'kalman' (default), 'ema', 'ma', 'sg'."""
 
     def __init__(self, filter_type: str = "kalman"):
         self.filter_type = filter_type.lower()

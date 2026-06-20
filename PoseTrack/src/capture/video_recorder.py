@@ -17,7 +17,6 @@ class VideoRecorder:
 
     def write_frame(self, frame):
         if self.writer is not None:
-            # Ensure frame matches resolution
             if frame.shape[:2] != (self.resolution[1], self.resolution[0]):
                 frame = cv2.resize(frame, self.resolution)
             self.writer.write(frame)

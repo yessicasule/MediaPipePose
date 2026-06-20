@@ -3,18 +3,16 @@
 // Drives 4 avatar GameObjects from a single UdpAngleReceiver using
 // the corresponding data source (MediaPipe, MoveNet, Fusion, GAN).
 //
-// Setup:
-//   1. Attach this script to any scene root GameObject.
-//   2. Drag the same UdpAngleReceiver into the 'receiver' field.
-//   3. Drag the 4 ArmAngleController GameObjects into the avatar slots.
+// Setup (automatic via SceneBuilder or manual):
+//   1. Attach to any scene root GameObject.
+//   2. Assign the UdpAngleReceiver in the 'receiver' field.
+//   3. Drag the 4 ArmAngleController components into the avatar slots.
 
 using UnityEngine;
-using TMPro;
+using UnityEngine.UI;
 
 namespace PoseTrackReceiver
 {
-    public enum AvatarDataSource { MediaPipe, MoveNet, Fusion, GAN }
-
     public class MultiAvatarManager : MonoBehaviour
     {
         [Header("Shared Receiver (single UDP port)")]
@@ -26,20 +24,20 @@ namespace PoseTrackReceiver
         public ArmAngleController avatarFusion;
         public ArmAngleController avatarGAN;
 
-        [Header("Labels (optional TextMeshPro)")]
-        public TMP_Text labelMediaPipe;
-        public TMP_Text labelMoveNet;
-        public TMP_Text labelFusion;
-        public TMP_Text labelGAN;
+        [Header("Labels (optional Legacy UI.Text)")]
+        public Text labelMediaPipe;
+        public Text labelMoveNet;
+        public Text labelFusion;
+        public Text labelGAN;
 
-        [Header("Show uncertainty badge on Fusion avatar")]
-        public TMP_Text uncertaintyText;
+        [Header("Uncertainty badge on Fusion avatar (optional)")]
+        public Text uncertaintyText;
 
         void Start()
         {
             if (receiver == null)
             {
-                Debug.LogError("[MultiAvatarManager] UdpAngleReceiver is not assigned!");
+                Debug.LogError("[MultiAvatarManager] UdpAngleReceiver not assigned!");
                 return;
             }
 
@@ -51,9 +49,9 @@ namespace PoseTrackReceiver
 
         void Update()
         {
-            if (!receiver.HasData) return;
+            if (receiver == null || !receiver.HasData) return;
 
-            // MediaPipe avatar
+            // ── MediaPipe avatar ─────────────────────────────────────────────
             if (avatarMediaPipe != null)
                 avatarMediaPipe.ApplyAngles(
                     receiver.Latest_MP.shoulderPitch,
@@ -61,7 +59,7 @@ namespace PoseTrackReceiver
                     receiver.Latest_MP.shoulderYaw,
                     receiver.Latest_MP.elbowFlex);
 
-            // MoveNet avatar
+            // ── MoveNet avatar ───────────────────────────────────────────────
             if (avatarMoveNet != null)
                 avatarMoveNet.ApplyAngles(
                     receiver.Latest_MV.shoulderPitch,
@@ -69,7 +67,7 @@ namespace PoseTrackReceiver
                     receiver.Latest_MV.shoulderYaw,
                     receiver.Latest_MV.elbowFlex);
 
-            // Fusion avatar
+            // ── Fusion avatar (with uncertainty badge) ───────────────────────
             if (avatarFusion != null)
             {
                 avatarFusion.ApplyAngles(
@@ -82,13 +80,13 @@ namespace PoseTrackReceiver
                 {
                     float unc  = receiver.Latest_FU.uncertainty;
                     float conf = 1f / (1f + unc);
-                    uncertaintyText.text = $"Conf: {conf:P0}  ±{unc:F2}°";
+                    uncertaintyText.text  = $"Conf: {conf:P0}  ±{unc:F2}°";
                     uncertaintyText.color = conf > 0.85f ? Color.green :
-                                            conf > 0.6f  ? Color.yellow : Color.red;
+                                            conf > 0.60f ? Color.yellow : Color.red;
                 }
             }
 
-            // GAN avatar
+            // ── GAN avatar ───────────────────────────────────────────────────
             if (avatarGAN != null)
                 avatarGAN.ApplyAngles(
                     receiver.Latest_GR.shoulderPitch,

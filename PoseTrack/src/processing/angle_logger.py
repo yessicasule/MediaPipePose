@@ -12,28 +12,28 @@ class AngleLogger:
             output_dir = ANGLES_DIR
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.csv_path = None
         self.csv_file = None
         self.csv_writer = None
         self.start_time = None
         self.running = False
-        
+
         self.angle_history = []
         self.max_history = 1000
 
     def start(self, session_name: Optional[str] = None):
         if session_name is None:
             session_name = f"session_{int(time.time())}"
-        
+
         self.csv_path = self.output_dir / f"{session_name}.csv"
         self.csv_file = open(self.csv_path, 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
-            "timestamp", "elapsed_s", 
+            "timestamp", "elapsed_s",
             "shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"
         ])
-        
+
         self.start_time = time.perf_counter()
         self.running = True
         print(f"Logging to {self.csv_path}")
@@ -41,7 +41,7 @@ class AngleLogger:
     def log(self, angles: Dict[str, float]):
         if not self.running:
             return
-            
+
         elapsed = time.perf_counter() - self.start_time
         self.csv_writer.writerow([
             f"{time.time():.3f}",
@@ -52,7 +52,7 @@ class AngleLogger:
             f"{angles.get('elbow_flexion', 0):.2f}"
         ])
         self.csv_file.flush()
-        
+
         self.angle_history.append({
             'elapsed': elapsed,
             **angles
@@ -69,7 +69,7 @@ class AngleLogger:
     def get_statistics(self) -> Dict[str, float]:
         if not self.angle_history:
             return {}
-        
+
         keys = ["shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"]
         stats = {}
         for key in keys:
@@ -96,16 +96,16 @@ class AngleVisualizer:
     def plot_history(self, logger: AngleLogger, output_path: Optional[Path] = None):
         if not self.available or not logger.angle_history:
             return
-            
+
         data = logger.angle_history
         elapsed = [d['elapsed'] for d in data]
-        
+
         fig, axes = self.plt.subplots(2, 2, figsize=(12, 8))
         axes = axes.flatten()
-        
+
         keys = ["shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"]
         titles = ["Shoulder Elevation", "Shoulder Yaw", "Shoulder Roll", "Elbow Flexion"]
-        
+
         for i, (key, title) in enumerate(zip(keys, titles)):
             values = [d.get(key, 0) for d in data]
             axes[i].plot(elapsed, values)
@@ -113,13 +113,13 @@ class AngleVisualizer:
             axes[i].set_xlabel("Time (s)")
             axes[i].set_ylabel("Angle (deg)")
             axes[i].grid(True)
-        
+
         self.plt.tight_layout()
-        
+
         if output_path is None:
             from config.config import OUTPUTS_DIR
             output_path = OUTPUTS_DIR / f"angle_plot_{int(time.time())}.png"
-        
+
         self.plt.savefig(output_path)
         self.plt.close()
         print(f"Plot saved to {output_path}")

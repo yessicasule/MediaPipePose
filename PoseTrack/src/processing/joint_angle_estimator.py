@@ -59,7 +59,7 @@ def compute_shoulder_elevation(landmarks) -> float:
             landmarks[SHOULDER][1] - hip_mid[1],
             landmarks[SHOULDER][2] - hip_mid[2],
         ]))
-        
+
     upper_arm = _unit(_vec(landmarks[SHOULDER], landmarks[ELBOW]))
     return _angle_between(torso_up, upper_arm)
 
@@ -70,7 +70,7 @@ def compute_shoulder_horizontal(landmarks) -> float:
     except AttributeError:
         shoulder_l = np.array([landmarks[11][0], landmarks[11][1], landmarks[11][2]])
         shoulder_r = np.array([landmarks[12][0], landmarks[12][1], landmarks[12][2]])
-        
+
     torso_lateral = _unit(shoulder_r - shoulder_l)
     upper_arm = _unit(_vec(landmarks[SHOULDER], landmarks[ELBOW]))
     proj = upper_arm - np.dot(upper_arm, np.array([0, 1, 0])) * np.array([0, 1, 0])
@@ -79,7 +79,7 @@ def compute_shoulder_horizontal(landmarks) -> float:
 def compute_shoulder_roll(landmarks) -> float:
     upper_arm = _unit(_vec(landmarks[SHOULDER], landmarks[ELBOW]))
     forearm = _unit(_vec(landmarks[ELBOW], landmarks[WRIST]))
-    
+
     try:
         hip_mid = np.array([
             (landmarks[HIP_L].x + landmarks[HIP_R].x) / 2,
@@ -102,11 +102,11 @@ def compute_shoulder_roll(landmarks) -> float:
             landmarks[SHOULDER][1] - hip_mid[1],
             landmarks[SHOULDER][2] - hip_mid[2],
         ]))
-    
+
     cross_ua_fa = np.cross(upper_arm, forearm)
     y = np.dot(cross_ua_fa, upper_arm)
     x = np.dot(forearm, torso)
-    
+
     roll = math.atan2(y, x)
     return float(np.degrees(roll))
 
