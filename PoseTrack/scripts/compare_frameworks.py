@@ -1,31 +1,52 @@
-#!/usr/bin/env python3
 """
-compare_frameworks.py
-=====================
-Takes a video file (or live webcam) as input and compares:
-  1. MediaPipe Pose   (raw)
-  2. MoveNet Lightning (raw)
-  3. PoseNet           (raw)
-  4. DeepFusionPose    (if fusion_best.pt is present)
+compare_frameworks.py — Pose Estimation Framework Benchmark
+============================================================
 
-Metrics reported per framework:
-  - Mean FPS
-  - Mean inference time (ms/frame)
-  - Detection rate (% frames with a valid pose)
-  - Per-joint mean angle  (shoulder pitch/roll/yaw, elbow flexion)
-  - Per-joint std (jitter proxy — lower = more stable)
-  - Static variance score  (std during near-zero-motion segments)
+Evaluates MediaPipe, MoveNet, and PoseNet on a video file or webcam,
+producing a quantitative comparison of their performance on the right-arm
+joint angle estimation task.
 
-Usage:
-    python scripts/compare_frameworks.py --video path/to/video.mp4
-    python scripts/compare_frameworks.py --webcam          # live camera
-    python scripts/compare_frameworks.py --video my.mp4 --fusion_ckpt outputs/models/fusion_best.pt
+Metrics reported per framework
+-------------------------------
+    FPS                  : Mean inference throughput (frames / second)
+    ms / frame           : Mean per-frame inference time
+    Detection rate       : Fraction of frames with a valid detected pose
+    Per-joint mean       : Mean estimated angle across all detected frames
+    Per-joint σ (jitter) : Angle standard deviation — lower = more stable
+    Latency P95          : 95th percentile per-frame inference time (ms)
+
+Angle outputs use the anatomically consistent ZXY decomposition from
+angle_solver.py. Keys: shoulder_flexion, shoulder_abduction,
+shoulder_rotation, elbow_flexion.
+
+Usage
+-----
+    # On a video file (recommended for reproducible results)
+    python scripts/compare_frameworks.py --video path/to/clip.mp4
+
+    # From webcam (records max_frames frames live)
+    python scripts/compare_frameworks.py --webcam --max_frames 300
+
+    # Compare only specific frameworks
+    python scripts/compare_frameworks.py --video clip.mp4 \\
+        --frameworks mediapipe movenet_lightning
+
+    # Use a specific filter
+    python scripts/compare_frameworks.py --video clip.mp4 --filter kalman
+
+Output files (in --output_dir)
+-------------------------------
+    comparison_report.json  — Full metrics (importable for paper tables)
+    comparison_report.png   — Publication-quality figure (dark theme)
+    per_joint_timeseries.png — Raw vs. filtered angle traces per framework
 """
+
+from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
-import json
 from pathlib import Path
 
 import cv2
@@ -33,400 +54,433 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+# Ensure project root on path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.pose.mediapipe_runner import MediaPipeRunner
-from src.processing.joint_angle_estimator import compute_all
-from src.processing.angle_filter import AngleFilterSystem
+from src.pose import load_estimator
+from src.processing.angle_solver import compute_arm_angles, ArmAngles
+from src.processing.angle_filter import AngleFilterBank
 
-JOINTS = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow_flexion"]
-JOINT_LABELS = ["Shoulder Pitch", "Shoulder Roll", "Shoulder Yaw", "Elbow Flexion"]
+# ── Joint metadata ──────────────────────────────────────────────────────────
+JOINTS = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
+JOINT_LABELS = {
+    "shoulder_flexion":   "Shoulder Flexion (°)",
+    "shoulder_abduction": "Shoulder Abduction (°)",
+    "shoulder_rotation":  "Shoulder Rotation (°)",
+    "elbow_flexion":      "Elbow Flexion (°)",
+}
+JOINT_COLORS = {
+    "shoulder_flexion":   "#64dc64",   # green
+    "shoulder_abduction": "#64a0ff",   # blue
+    "shoulder_rotation":  "#ffb450",   # orange
+    "elbow_flexion":      "#dc50dc",   # purple
+}
+
+# ── Available frameworks ─────────────────────────────────────────────────────
+ALL_FRAMEWORKS = ["mediapipe", "movenet_lightning", "posenet"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Framework wrappers (graceful import so missing TF doesn't crash the script)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Framework loading ────────────────────────────────────────────────────────
 
-def load_runners(fusion_ckpt=None, scaler_path=None):
+def load_runners(framework_names: list[str]) -> dict[str, object]:
+    """
+    Load requested pose estimators. Frameworks that fail to import are
+    skipped with a warning (e.g. TF not installed → MoveNet/PoseNet skipped).
+    """
     runners = {}
-
-    # MediaPipe
-    try:
-        runners["MediaPipe"] = MediaPipeRunner()
-        print("[✓] MediaPipe loaded")
-    except Exception as e:
-        print(f"[✗] MediaPipe: {e}")
-
-    # MoveNet
-    try:
-        from src.pose.movenet_runner import MoveNetRunner
-        runners["MoveNet"] = MoveNetRunner("movenet_lightning")
-        print("[✓] MoveNet loaded")
-    except Exception as e:
-        print(f"[✗] MoveNet: {e}")
-
-    # PoseNet
-    try:
-        from src.pose.posenet_runner import PoseNetRunner
-        runners["PoseNet"] = PoseNetRunner()
-        print("[✓] PoseNet loaded")
-    except Exception as e:
-        print(f"[✗] PoseNet: {e}")
-
-    # DeepFusionPose (optional — only if checkpoint provided)
-    if fusion_ckpt and Path(fusion_ckpt).exists():
+    for name in framework_names:
         try:
-            import torch
-            from src.models.fusion_network import DeepFusionPoseModel
-            import json as _json
-
-            model = DeepFusionPoseModel()
-            model.load_state_dict(torch.load(fusion_ckpt, map_location="cpu"))
-            model.eval()
-
-            scaler_stats = None
-            if scaler_path and Path(scaler_path).exists():
-                with open(scaler_path) as f:
-                    scaler_stats = _json.load(f)
-
-            runners["DeepFusionPose"] = ("fusion", model, scaler_stats)
-            print("[✓] DeepFusionPose loaded from", fusion_ckpt)
+            runner = load_estimator(name)
+            runners[name] = runner
+            print(f"  [✓] {runner.name} loaded")
         except Exception as e:
-            print(f"[✗] DeepFusionPose: {e}")
-    elif fusion_ckpt:
-        print(f"[!] fusion_ckpt not found: {fusion_ckpt} — skipping fusion model")
-
+            print(f"  [✗] {name}: {e}")
     return runners
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-framework benchmarking
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Per-framework evaluation ─────────────────────────────────────────────────
 
-def run_framework(name, runner, frames_rgb, filter_type="kalman"):
-    """
-    Run one framework over a list of pre-loaded RGB frames.
-    Returns a results dict.
-    """
-    print(f"\n  Running {name}...")
-    filt = AngleFilterSystem(filter_type=filter_type)
-
-    times, detected = [], []
-    raw_angles   = {j: [] for j in JOINTS}
-    filt_angles  = {j: [] for j in JOINTS}
-
-    is_fusion = isinstance(runner, tuple) and runner[0] == "fusion"
-
-    for frame_rgb in frames_rgb:
-        t0 = time.perf_counter()
-
-        if is_fusion:
-            # Use MediaPipe for keypoints, then pass through fusion model
-            _, model, scaler = runner
-            # We need a separate mediapipe runner — use a temporary one
-            # (In real use, the fusion model takes stacked features; here we
-            #  fall back to MediaPipe angles as a demonstration input)
-            lm = None  # fusion runs on sequence data; approximated here
-            elapsed = time.perf_counter() - t0
-            times.append(elapsed)
-            detected.append(False)
-            continue
-        else:
-            lm = runner.process(frame_rgb)
-
-        elapsed = time.perf_counter() - t0
-        times.append(elapsed)
-
-        if lm is not None:
-            try:
-                angles = compute_all(lm)
-                detected.append(True)
-                filtered = filt.update(
-                    angles.get("shoulder_elevation", 0),
-                    angles.get("shoulder_yaw", 0),
-                    angles.get("shoulder_roll", 0),
-                    angles.get("elbow_flexion", 0),
-                )
-                for j, key in enumerate(JOINTS):
-                    raw_val = angles.get(key, angles.get("shoulder_elevation", 0) if key == "shoulder_pitch" else 0)
-                    raw_angles[key].append(float(raw_val))
-                    filt_angles[key].append(float(filtered[j]))
-            except Exception:
-                detected.append(False)
-        else:
-            detected.append(False)
-
-    n = len(frames_rgb)
-    n_det = sum(detected)
-    mean_ms = np.mean(times) * 1000
-    fps     = 1.0 / np.mean(times) if times else 0
-
-    metrics = {
-        "name":           name,
-        "n_frames":       n,
-        "detected":       n_det,
-        "detection_rate": n_det / n if n else 0,
-        "mean_ms":        float(mean_ms),
-        "fps":            float(fps),
-        "joints":         {},
+def _angles_to_dict(a: ArmAngles) -> dict[str, float]:
+    return {
+        "shoulder_flexion":   a.shoulder_flexion,
+        "shoulder_abduction": a.shoulder_abduction,
+        "shoulder_rotation":  a.shoulder_rotation,
+        "elbow_flexion":      a.elbow_flexion,
     }
 
+
+def run_framework(
+    name:         str,
+    runner,
+    frames_rgb:   list[np.ndarray],
+    filter_type:  str = "kalman",
+    stream_hz:    float = 30.0,
+    verbose:      bool = True,
+) -> dict:
+    """
+    Run one framework over a pre-loaded list of RGB frames and collect metrics.
+
+    Parameters
+    ----------
+    name : str
+        Display name of the framework.
+    runner : PoseEstimator
+        Instantiated estimator.
+    frames_rgb : list[np.ndarray]
+        List of (H, W, 3) RGB uint8 frames.
+    filter_type : str
+        Temporal filter to apply to angle signals.
+    stream_hz : float
+        Expected frame rate (used to initialise Kalman dt).
+    verbose : bool
+        Print per-frame progress.
+
+    Returns
+    -------
+    dict
+        Metrics dict with per-joint arrays and summary statistics.
+    """
+    filt = AngleFilterBank(filter_type=filter_type, stream_hz=stream_hz)
+
+    inference_times_ms = []
+    detected_flags     = []
+    raw_angles:  dict[str, list[float]] = {j: [] for j in JOINTS}
+    filt_angles: dict[str, list[float]] = {j: [] for j in JOINTS}
+
+    n = len(frames_rgb)
+    if verbose:
+        print(f"\n  [{name}] Evaluating {n} frames...")
+
+    for i, frame_rgb in enumerate(frames_rgb):
+        t0 = time.perf_counter()
+        lms = runner.process(frame_rgb)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        inference_times_ms.append(elapsed_ms)
+
+        if lms is not None:
+            angles = compute_arm_angles(lms)
+        else:
+            angles = None
+
+        if angles is not None:
+            detected_flags.append(True)
+            filtered = filt.update(angles)
+            for j in JOINTS:
+                raw_angles[j].append(_angles_to_dict(angles)[j])
+                filt_angles[j].append(_angles_to_dict(filtered)[j])
+        else:
+            detected_flags.append(False)
+            # Append last known filtered value to keep arrays aligned
+            for j in JOINTS:
+                filt_angles[j].append(filt_angles[j][-1] if filt_angles[j] else 0.0)
+                raw_angles[j].append(float("nan"))
+
+        if verbose and (i + 1) % 50 == 0:
+            rate = sum(detected_flags) / len(detected_flags)
+            print(f"    frame {i+1:>4}/{n}  det={rate*100:.0f}%  "
+                  f"ms={np.mean(inference_times_ms):.1f}")
+
+    times_arr = np.array(inference_times_ms)
+    n_det     = int(sum(detected_flags))
+
+    # Per-joint statistics (NaN-safe)
+    joint_stats = {}
     for j in JOINTS:
-        arr = np.array(raw_angles[j])
-        far = np.array(filt_angles[j])
-        metrics["joints"][j] = {
-            "mean_raw":  float(arr.mean())  if len(arr) else 0,
-            "std_raw":   float(arr.std())   if len(arr) else 0,
-            "mean_filt": float(far.mean())  if len(far) else 0,
-            "std_filt":  float(far.std())   if len(far) else 0,
-            "raw":       arr.tolist(),
-            "filtered":  far.tolist(),
+        raw_arr  = np.array(raw_angles[j])
+        filt_arr = np.array(filt_angles[j])
+        raw_valid = raw_arr[~np.isnan(raw_arr)]
+
+        joint_stats[j] = {
+            "mean_raw":  float(np.mean(raw_valid))  if len(raw_valid) else 0.0,
+            "std_raw":   float(np.std(raw_valid))   if len(raw_valid) else 0.0,
+            "mean_filt": float(np.nanmean(filt_arr)),
+            "std_filt":  float(np.nanstd(filt_arr)),
+            "raw":       raw_angles[j],       # kept for plotting
+            "filtered":  filt_angles[j],
         }
+
+    metrics = {
+        "name":            name,
+        "n_frames":        n,
+        "n_detected":      n_det,
+        "detection_rate":  n_det / n if n > 0 else 0.0,
+        "mean_ms":         float(np.mean(times_arr)),
+        "fps":             float(1000.0 / np.mean(times_arr)) if len(times_arr) else 0.0,
+        "p95_ms":          float(np.percentile(times_arr, 95)),
+        "filter_type":     filter_type,
+        "joints":          joint_stats,
+    }
+
+    if verbose:
+        print(f"    → FPS: {metrics['fps']:.1f}  "
+              f"det: {metrics['detection_rate']*100:.1f}%  "
+              f"P95: {metrics['p95_ms']:.1f}ms")
 
     return metrics
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Reporting
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Console report table ─────────────────────────────────────────────────────
 
-def print_table(all_metrics):
-    fw_names = [m["name"] for m in all_metrics]
-    col_w    = max(16, max(len(n) for n in fw_names) + 2)
+def print_table(all_metrics: list[dict]) -> None:
+    names  = [m["name"] for m in all_metrics]
+    col_w  = max(18, max(len(n) + 2 for n in names))
 
-    def row(label, vals):
+    sep = "─" * (24 + col_w * len(names))
+
+    def hdr(label, vals):
         print(f"  {label:<22}", end="")
         for v in vals:
             print(f"{str(v):>{col_w}}", end="")
         print()
 
-    print("\n" + "=" * (22 + col_w * len(fw_names)))
-    print("  FRAMEWORK COMPARISON SUMMARY")
-    print("=" * (22 + col_w * len(fw_names)))
-    row("Framework",      [m["name"]                          for m in all_metrics])
-    row("─" * 20,         ["─" * (col_w - 2)                 for _ in all_metrics])
-    row("FPS",            [f"{m['fps']:.1f}"                 for m in all_metrics])
-    row("ms / frame",     [f"{m['mean_ms']:.1f}"             for m in all_metrics])
-    row("Detection rate", [f"{m['detection_rate']*100:.1f}%" for m in all_metrics])
-    row("─" * 20,         ["─" * (col_w - 2)                 for _ in all_metrics])
+    print("\n" + "═" * (24 + col_w * len(names)))
+    print("  FRAMEWORK COMPARISON — MONOARM")
+    print("═" * (24 + col_w * len(names)))
+    hdr("Framework",      names)
+    hdr(sep[:22],         [sep[:col_w]] * len(names))
+    hdr("FPS",            [f"{m['fps']:.1f}"                 for m in all_metrics])
+    hdr("ms / frame",     [f"{m['mean_ms']:.1f}"             for m in all_metrics])
+    hdr("P95 latency",    [f"{m['p95_ms']:.1f} ms"          for m in all_metrics])
+    hdr("Detection rate", [f"{m['detection_rate']*100:.1f}%" for m in all_metrics])
+    hdr(sep[:22],         [sep[:col_w]] * len(names))
 
-    for j, jl in zip(JOINTS, JOINT_LABELS):
-        row(f"{jl} mean",
-            [f"{m['joints'][j]['mean_raw']:>6.1f}°" if m['joints'][j]['mean_raw'] else "   N/A"
+    for j in JOINTS:
+        label = JOINT_LABELS[j].replace(" (°)", "")
+        hdr(f"{label} μ",
+            [f"{m['joints'][j]['mean_raw']:+.1f}°"  if m["n_detected"] else "N/A"
              for m in all_metrics])
-        row(f"{jl} jitter (σ)",
-            [f"{m['joints'][j]['std_raw']:>6.2f}°" if m['joints'][j]['std_raw'] else "   N/A"
+        hdr(f"{label} σ",
+            [f"{m['joints'][j]['std_raw']:.2f}°"   if m["n_detected"] else "N/A"
              for m in all_metrics])
 
-    print("=" * (22 + col_w * len(fw_names)))
+    print("═" * (24 + col_w * len(names)))
 
-    # Winner per metric
-    valid = [m for m in all_metrics if m["detection_rate"] > 0]
-    if valid:
-        best_fps  = max(valid, key=lambda m: m["fps"])
-        best_det  = max(valid, key=lambda m: m["detection_rate"])
-        best_jit  = min(valid, key=lambda m: m["joints"]["elbow_flexion"]["std_raw"])
-        print(f"\n  🏆 Fastest:    {best_fps['name']}  ({best_fps['fps']:.1f} FPS)")
-        print(f"  🏆 Most stable:{best_jit['name']}  (σ={best_jit['joints']['elbow_flexion']['std_raw']:.2f}° elbow)")
-        print(f"  🏆 Detection:  {best_det['name']}  ({best_det['detection_rate']*100:.1f}%)")
+    # Overall winners
+    valid = [m for m in all_metrics if m["n_detected"] > 0]
+    if len(valid) >= 2:
+        best_fps   = max(valid, key=lambda m: m["fps"])
+        best_det   = max(valid, key=lambda m: m["detection_rate"])
+        # Use elbow σ as stability proxy (most sensitive to jitter)
+        best_stab  = min(valid, key=lambda m: m["joints"]["elbow_flexion"]["std_raw"])
+        print(f"\n  🏆 Fastest:       {best_fps['name']}  ({best_fps['fps']:.1f} FPS)")
+        print(f"  🏆 Most stable:   {best_stab['name']}"
+              f"  (σ={best_stab['joints']['elbow_flexion']['std_raw']:.2f}° elbow)")
+        print(f"  🏆 Best detection:{best_det['name']}"
+              f"  ({best_det['detection_rate']*100:.1f}%)\n")
 
 
-def plot_results(all_metrics, out_path="outputs/comparison_report.png"):
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+# ── Plotting ─────────────────────────────────────────────────────────────────
 
-    valid = [m for m in all_metrics if any(
-        m["joints"][j]["std_raw"] > 0 for j in JOINTS)]
+def _style_ax(ax, title: str) -> None:
+    ax.set_facecolor("#1a1a26")
+    ax.tick_params(colors="#aaa", labelsize=8)
+    ax.spines[:].set_color("#333")
+    ax.set_title(title, color="#aacfff", fontsize=9, pad=5)
+    for lbl in [ax.yaxis.label, ax.xaxis.label]:
+        lbl.set_color("#ccc")
 
+
+def plot_summary(all_metrics: list[dict], out_path: str) -> None:
+    """
+    Generate publication-quality summary figure (dark theme).
+    Panels: FPS, Detection Rate, P95 Latency, Elbow Jitter.
+    """
+    valid  = [m for m in all_metrics if m["n_detected"] > 0]
     if not valid:
-        print("[!] No valid angle data to plot (all frameworks failed to detect pose).")
+        print("[!] No valid data to plot.")
         return
 
-    n_fw   = len(valid)
-    colors = plt.cm.tab10(np.linspace(0, 0.6, n_fw))
     names  = [m["name"] for m in valid]
+    n_fw   = len(valid)
+    colors = [plt.cm.tab10(i / 10) for i in range(n_fw)]
     x      = np.arange(n_fw)
+    bar_kw = dict(width=0.55, edgecolor="#333", linewidth=0.6)
 
-    fig = plt.figure(figsize=(18, 12), facecolor="#0e0e14")
-    fig.suptitle("Pose Estimation Framework Comparison",
-                 fontsize=16, color="white", fontweight="bold", y=0.98)
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4), facecolor="#0e0e18")
+    fig.suptitle(
+        "Pose Framework Comparison — MonoArm Right-Arm Angle Estimation",
+        fontsize=13, color="white", fontweight="bold", y=1.01,
+    )
 
-    gs = gridspec.GridSpec(3, 4, figure=fig,
-                           hspace=0.55, wspace=0.35,
-                           left=0.06, right=0.97, top=0.93, bottom=0.06)
+    panels = [
+        ("FPS  (higher ↑)", [m["fps"]                              for m in valid], "frames/s"),
+        ("Detection Rate (%)",  [m["detection_rate"] * 100        for m in valid], "%"),
+        ("P95 Latency  (lower ↓)", [m["p95_ms"]                   for m in valid], "ms"),
+        ("Elbow σ Jitter  (lower ↓)", [m["joints"]["elbow_flexion"]["std_raw"] for m in valid], "°"),
+    ]
 
-    ax_style = dict(facecolor="#1a1a24", tick_params=dict(colors="white"),
-                    label_color="white", title_color="#aaccff")
+    for ax, (title, values, ylabel) in zip(axes, panels):
+        bars = ax.bar(x, values, color=colors, **bar_kw)
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, rotation=20, ha="right", fontsize=8, color="#ccc")
+        ax.set_ylabel(ylabel, fontsize=8, color="#ccc")
+        _style_ax(ax, title)
+        # Value labels on bars
+        for bar, v in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() * 1.02,
+                f"{v:.1f}",
+                ha="center", va="bottom", color="white", fontsize=8,
+            )
 
-    def style_ax(ax, title):
-        ax.set_facecolor("#1a1a24")
-        ax.tick_params(colors="white", labelsize=8)
-        ax.spines[:].set_color("#333")
-        ax.set_title(title, color="#aaccff", fontsize=9, pad=4)
-        ax.yaxis.label.set_color("white")
-        ax.xaxis.label.set_color("white")
+    # Reference line: ±5° jitter spec on elbow jitter panel
+    axes[3].axhline(5.0, color="#ff6666", linestyle="--", linewidth=0.9,
+                    label="±5° spec")
+    axes[3].legend(fontsize=7, labelcolor="white", facecolor="#1a1a26",
+                   framealpha=0.7)
 
-    # ── Row 0: FPS, Detection rate, mean inference time, summary bar ─────────
-    ax0 = fig.add_subplot(gs[0, 0])
-    bars = ax0.bar(x, [m["fps"] for m in valid], color=colors)
-    ax0.set_xticks(x); ax0.set_xticklabels(names, rotation=15, ha="right", fontsize=7)
-    for bar, m in zip(bars, valid):
-        ax0.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
-                 f"{m['fps']:.1f}", ha="center", va="bottom", color="white", fontsize=8)
-    style_ax(ax0, "FPS  (higher = better)")
-    ax0.set_ylabel("frames / sec", color="white", fontsize=8)
-
-    ax1 = fig.add_subplot(gs[0, 1])
-    bars = ax1.bar(x, [m["detection_rate"]*100 for m in valid], color=colors)
-    ax1.set_xticks(x); ax1.set_xticklabels(names, rotation=15, ha="right", fontsize=7)
-    ax1.set_ylim(0, 110)
-    for bar, m in zip(bars, valid):
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
-                 f"{m['detection_rate']*100:.0f}%", ha="center", va="bottom", color="white", fontsize=8)
-    style_ax(ax1, "Detection Rate  (higher = better)")
-    ax1.set_ylabel("% frames detected", color="white", fontsize=8)
-
-    ax2 = fig.add_subplot(gs[0, 2])
-    bars = ax2.bar(x, [m["mean_ms"] for m in valid], color=colors)
-    ax2.set_xticks(x); ax2.set_xticklabels(names, rotation=15, ha="right", fontsize=7)
-    for bar, m in zip(bars, valid):
-        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
-                 f"{m['mean_ms']:.1f}", ha="center", va="bottom", color="white", fontsize=8)
-    style_ax(ax2, "Inference Time  ms/frame  (lower = better)")
-    ax2.set_ylabel("milliseconds", color="white", fontsize=8)
-
-    ax3 = fig.add_subplot(gs[0, 3])
-    jit_elbow = [m["joints"]["elbow_flexion"]["std_raw"] for m in valid]
-    bars = ax3.bar(x, jit_elbow, color=colors)
-    ax3.set_xticks(x); ax3.set_xticklabels(names, rotation=15, ha="right", fontsize=7)
-    ax3.axhline(5.0, color="#ff6666", linestyle="--", linewidth=0.8, label="±5° spec")
-    ax3.legend(fontsize=7, labelcolor="white", facecolor="#1a1a24")
-    for bar, v in zip(bars, jit_elbow):
-        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                 f"{v:.2f}°", ha="center", va="bottom", color="white", fontsize=8)
-    style_ax(ax3, "Elbow Jitter σ  (lower = better)")
-    ax3.set_ylabel("std dev (°)", color="white", fontsize=8)
-
-    # ── Rows 1–2: per-joint mean ± std time-series for each framework ─────────
-    joint_axes_row = [1, 1, 2, 2]
-    joint_axes_col = [0, 1, 2, 3]
-
-    for ji, (jkey, jlabel) in enumerate(zip(JOINTS, JOINT_LABELS)):
-        ax = fig.add_subplot(gs[joint_axes_row[ji], joint_axes_col[ji]])
-        for mi, m in enumerate(valid):
-            raw  = m["joints"][jkey]["raw"]
-            fraw = m["joints"][jkey]["filtered"]
-            if not raw:
-                continue
-            t = np.arange(len(raw))
-            ax.plot(t, raw,  alpha=0.25, linewidth=0.6, color=colors[mi])
-            ax.plot(t, fraw, alpha=0.90, linewidth=1.2, color=colors[mi],
-                    label=m["name"])
-        style_ax(ax, f"{jlabel}  raw (faint) vs filtered (solid)")
-        ax.set_xlabel("frame", color="white", fontsize=7)
-        ax.set_ylabel("degrees (°)", color="white", fontsize=8)
-        ax.legend(fontsize=6.5, labelcolor="white", facecolor="#1a1a24",
-                  loc="upper right", framealpha=0.6)
-
-    plt.savefig(out_path, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close()
-    print(f"\n[✓] Plot saved → {out_path}")
+    print(f"[✓] Summary figure saved → {out_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+def plot_timeseries(all_metrics: list[dict], out_path: str) -> None:
+    """
+    Per-joint raw vs. filtered angle traces for each framework.
+    4 rows (joints) × N cols (frameworks).
+    """
+    valid = [m for m in all_metrics if m["n_detected"] > 0]
+    if not valid:
+        return
 
-def main():
+    n_fw     = len(valid)
+    n_joints = len(JOINTS)
+
+    fig, axes = plt.subplots(
+        n_joints, n_fw,
+        figsize=(6 * n_fw, 3 * n_joints),
+        facecolor="#0e0e18",
+        squeeze=False,
+    )
+    fig.suptitle("Joint Angle Time Series: Raw vs. Filtered",
+                 fontsize=13, color="white", fontweight="bold")
+
+    for ji, jkey in enumerate(JOINTS):
+        color = JOINT_COLORS[jkey]
+        for fi, m in enumerate(valid):
+            ax = axes[ji][fi]
+            raw  = np.array(m["joints"][jkey]["raw"],      dtype=float)
+            filt = np.array(m["joints"][jkey]["filtered"], dtype=float)
+            t    = np.arange(len(raw))
+
+            ax.plot(t, raw,  alpha=0.25, linewidth=0.8, color=color, label="raw")
+            ax.plot(t, filt, alpha=0.90, linewidth=1.5, color=color, label="filtered")
+            ax.axhline(0, color="#444", linewidth=0.5, linestyle="--")
+            _style_ax(ax, f"{m['name']} — {JOINT_LABELS[jkey]}")
+            ax.set_xlabel("frame", fontsize=7, color="#aaa")
+            ax.set_ylabel("°", fontsize=8, color="#aaa")
+            if ji == 0:
+                ax.legend(fontsize=6.5, labelcolor="white", facecolor="#1a1a26",
+                          loc="upper right", framealpha=0.6)
+
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close()
+    print(f"[✓] Time-series figure saved → {out_path}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Compare pose frameworks on a video file or webcam.")
+        description="Compare pose estimation frameworks for MonoArm."
+    )
     src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--video",  type=str, help="Path to video file (.mp4 / .avi / .mov)")
-    src.add_argument("--webcam", action="store_true", help="Use webcam instead of video file")
-    ap.add_argument("--max_frames",   type=int, default=300,
-                    help="Max frames to evaluate per framework (default 300)")
-    ap.add_argument("--fusion_ckpt",  type=str, default=None,
-                    help="Optional: path to fusion_best.pt to include DeepFusionPose")
-    ap.add_argument("--scaler",       type=str,
-                    default="outputs/models/fusion_scaler.json",
-                    help="Path to fusion_scaler.json")
-    ap.add_argument("--filter",       type=str, default="kalman",
-                    choices=["kalman", "ema", "ma", "sg"])
-    ap.add_argument("--output_dir",   type=str, default="outputs")
+    src.add_argument("--video",  type=str, help="Path to video file")
+    src.add_argument("--webcam", action="store_true", help="Capture from webcam")
+    ap.add_argument("--max_frames",   type=int,   default=300,
+                    help="Max frames to evaluate (default 300)")
+    ap.add_argument("--frameworks",   nargs="+",  default=ALL_FRAMEWORKS,
+                    choices=ALL_FRAMEWORKS,
+                    help="Frameworks to include (default: all)")
+    ap.add_argument("--filter",       type=str,   default="kalman",
+                    choices=["kalman", "ma", "sg"],
+                    help="Temporal filter type (default: kalman)")
+    ap.add_argument("--output_dir",   type=str,   default="outputs",
+                    help="Directory for saved reports and figures")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load video frames ────────────────────────────────────────────────────
+    # ── Load frames ──────────────────────────────────────────────────────────
     if args.webcam:
-        src_cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(0)
         print(f"[→] Recording {args.max_frames} frames from webcam...")
     else:
-        video_path = Path(args.video)
-        if not video_path.exists():
-            print(f"[✗] Video not found: {video_path}")
+        vpath = Path(args.video)
+        if not vpath.exists():
+            print(f"[✗] Video not found: {vpath}")
             sys.exit(1)
-        src_cap = cv2.VideoCapture(str(video_path))
-        print(f"[→] Loading frames from: {video_path}")
+        cap = cv2.VideoCapture(str(vpath))
+        print(f"[→] Loading from: {vpath}")
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or args.max_frames
+    step  = max(1, total // args.max_frames)
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     frames_rgb = []
-    total = int(src_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or args.max_frames
-    step  = max(1, total // args.max_frames)
-
-    cap_idx = 0
+    idx = 0
     while len(frames_rgb) < args.max_frames:
-        ret, frame = src_cap.read()
+        ret, frame = cap.read()
         if not ret:
             break
-        if cap_idx % step == 0:
+        if idx % step == 0:
             frames_rgb.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        cap_idx += 1
-
-    src_cap.release()
-    print(f"[✓] Loaded {len(frames_rgb)} frames for evaluation")
+        idx += 1
+    cap.release()
 
     if not frames_rgb:
-        print("[✗] No frames loaded. Check video path.")
+        print("[✗] No frames loaded.")
         sys.exit(1)
+    print(f"[✓] {len(frames_rgb)} frames loaded  (source FPS ≈ {video_fps:.0f})")
 
-    # ── Load runners ──────────────────────────────────────────────────────────
+    # ── Load runners ─────────────────────────────────────────────────────────
     print("\n[→] Loading frameworks...")
-    runners = load_runners(
-        fusion_ckpt=args.fusion_ckpt,
-        scaler_path=args.scaler)
-
+    runners = load_runners(args.frameworks)
     if not runners:
-        print("[✗] No frameworks loaded. Install mediapipe, tensorflow-hub.")
+        print("[✗] No frameworks available. Install mediapipe and/or tensorflow.")
         sys.exit(1)
 
-    # ── Evaluate each framework ───────────────────────────────────────────────
+    # ── Evaluate ─────────────────────────────────────────────────────────────
     print("\n[→] Evaluating frameworks...")
     all_metrics = []
-    for name, runner in runners.items():
-        m = run_framework(name, runner, frames_rgb, filter_type=args.filter)
+    for fw_name, runner in runners.items():
+        m = run_framework(
+            name=fw_name,
+            runner=runner,
+            frames_rgb=frames_rgb,
+            filter_type=args.filter,
+            stream_hz=video_fps,
+        )
         all_metrics.append(m)
-        if hasattr(runner, "close"):
-            runner.close()
+        runner.close()
 
-    # ── Print table ───────────────────────────────────────────────────────────
+    # ── Report ───────────────────────────────────────────────────────────────
     print_table(all_metrics)
 
-    # ── Save JSON report ──────────────────────────────────────────────────────
-    report_path = out_dir / "comparison_report.json"
-    save_metrics = []
+    # Save JSON (strip raw arrays to keep file small)
+    json_metrics = []
     for m in all_metrics:
         m_clean = {k: v for k, v in m.items() if k != "joints"}
         m_clean["joints"] = {
-            j: {k2: v2 for k2, v2 in jdata.items() if k2 not in ("raw", "filtered")}
-            for j, jdata in m["joints"].items()
+            j: {k2: v2 for k2, v2 in jd.items() if k2 not in ("raw", "filtered")}
+            for j, jd in m["joints"].items()
         }
-        save_metrics.append(m_clean)
-    with open(report_path, "w") as f:
-        json.dump(save_metrics, f, indent=2)
-    print(f"[✓] JSON report → {report_path}")
+        json_metrics.append(m_clean)
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
-    plot_results(all_metrics, out_path=str(out_dir / "comparison_report.png"))
+    report_json = out_dir / "comparison_report.json"
+    with open(report_json, "w") as f:
+        json.dump(json_metrics, f, indent=2)
+    print(f"[✓] JSON report → {report_json}")
+
+    # Figures
+    plot_summary(all_metrics, str(out_dir / "comparison_report.png"))
+    plot_timeseries(all_metrics, str(out_dir / "per_joint_timeseries.png"))
 
 
 if __name__ == "__main__":

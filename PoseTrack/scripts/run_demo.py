@@ -1,307 +1,361 @@
 """
-run_demo.py — Complete integrated demonstration script.
+run_demo.py — MonoArm Live Pipeline Entry Point
+================================================
 
-THE single command to run for the final presentation:
+Runs the complete real-time arm angle estimation pipeline:
+    Camera → Pose Estimation → Angle Computation → Filtering
+    → Calibration → UDP Send → CSV Logging → Live Display
+
+Controls
+--------
+    Q  : Quit
+    F  : Cycle filter type (kalman → ma → sg → kalman)
+    C  : Enter calibration mode (static reference poses)
+    L  : Toggle CSV logging
+    R  : Reset filters
+
+Usage
+-----
     python scripts/run_demo.py
-
-What it does:
-  1. Opens webcam, overlays MediaPipe pose landmarks
-  2. Computes + filters joint angles (Kalman by default)
-  3. Recognizes gestures (WAVE, RAISE_ARM, REACH_FORWARD, ELBOW_FLEX, REST)
-  4. Streams all 4 UDP prefixes to Unity (MP / MV / FU / GR)
-     - MediaPipe-only mode when no trained models present
-     - Full Fusion + GAN pipeline when models are available
-  5. Logs joint angles to CSV (press L to toggle)
-  6. Shows live FPS + latency in overlay
-  7. Saves angle plot automatically on exit
-
-Controls:
-    Q  — quit
-    C  — run 3-pose calibration (arm_down → arm_forward → elbow_flex)
-    L  — toggle logging on/off (auto-saves CSV + plot on stop)
-    S  — save snapshot PNG
-    F  — cycle filter: Kalman → EMA → Moving Average → Savitzky-Golay
+    python scripts/run_demo.py --camera 0 --port 9000 --filter kalman
+    python scripts/run_demo.py --no-udp   (display only, no Unity)
 """
 
-import argparse, sys, time, socket
+from __future__ import annotations
+
+import argparse
+import sys
+import time
 from pathlib import Path
-from collections import deque
 
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+# Ensure src is on the path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.pose.mediapipe_runner import MediaPipeRunner
-from src.processing.joint_angle_estimator import compute_all
-from src.processing.angle_filter import AngleFilterSystem
-from src.processing.calibration import CalibrationManager
-from src.processing.angle_logger import AngleLogger, AngleVisualizer
-from src.processing.gesture_recognizer import GestureRecognizer, draw_gesture_overlay
-from src.streaming.udp_streamer import UdpAngleStreamer
-
-FILTER_NAMES = ["kalman", "ema", "ma", "sg"]
-
-# ── Optional model loader ─────────────────────────────────────────────────────
-def _try_load_models(fusion_ckpt, gan_ckpt, scaler_path):
-    try:
-        import torch, json
-        if not all(Path(p).exists() for p in [fusion_ckpt, gan_ckpt, scaler_path]):
-            return None, None, None, None
-        from src.models.fusion_network import DeepFusionPoseModel
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        with open(scaler_path) as f:
-            sc = json.load(f)
-        col_min = np.array(sc["col_min"], dtype=np.float32)
-        col_max = np.array(sc["col_max"], dtype=np.float32)
-        fusion = DeepFusionPoseModel()
-        fusion.load_state_dict(torch.load(fusion_ckpt, map_location=device))
-        fusion.to(device)
-        gan = DeepFusionPoseModel()
-        gan.load_state_dict(torch.load(gan_ckpt, map_location=device))
-        gan.eval().to(device)
-        print(f"✅  Fusion + GAN models loaded ({device})")
-        return fusion, gan, (col_min, col_max), device
-    except Exception as e:
-        print(f"⚠️  Models not loaded ({e}) — running MediaPipe-only mode")
-        return None, None, None, None
+from src.processing.coordinate_frame import build_torso_frame
+from src.processing.angle_solver import compute_arm_angles
+from src.processing.angle_filter import AngleFilterBank
+from src.processing.calibration import CalibrationManager, REQUIRED_POSES
+from src.processing.angle_logger import CsvAngleLogger, RollingAnglePlot
+from src.streaming.udp_streamer import UdpAngleSender
 
 
-# ── UDP helper ────────────────────────────────────────────────────────────────
-def _udp_send(sock, addr, prefix, vals):
-    body = ",".join(f"{v:.3f}" for v in vals)
-    sock.sendto(f"{prefix},{body}".encode(), addr)
+# ---------------------------------------------------------------------------
+# Drawing helpers
+# ---------------------------------------------------------------------------
+
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+_GREEN  = (100, 220, 100)
+_ORANGE = (80, 180, 255)
+_RED    = (80,  80, 240)
+_WHITE  = (230, 230, 230)
+_GREY   = (140, 140, 140)
+_BLACK  = (0, 0, 0)
 
 
-# ── Overlay ───────────────────────────────────────────────────────────────────
-def _draw_panel(frame, angles, fps, latency, logging_on, filter_name, calibrated, mode):
+def _draw_overlay(
+    frame: np.ndarray,
+    landmarks,
+    angles,
+    fps: float,
+    filter_type: str,
+    logging: bool,
+    calibrated: bool,
+    rot_reliable: bool,
+) -> None:
+    """Draw keypoint skeleton, angle HUD, and status bar onto the frame."""
+    h, w = frame.shape[:2]
+
+    # Draw right-arm skeleton
+    if landmarks is not None:
+        CONNECTIONS = [(12, 14), (14, 16)]   # right shoulder-elbow-wrist
+        KEY_INDICES = [11, 12, 13, 14, 15, 16, 23, 24]
+        for idx in KEY_INDICES:
+            lm = landmarks[idx]
+            cx, cy = int(lm.x * w), int(lm.y * h)
+            color = _GREEN if idx in (12, 14, 16) else _GREY
+            cv2.circle(frame, (cx, cy), 5, color, -1, cv2.LINE_AA)
+        for a, b in CONNECTIONS:
+            lmA, lmB = landmarks[a], landmarks[b]
+            pt1 = (int(lmA.x * w), int(lmA.y * h))
+            pt2 = (int(lmB.x * w), int(lmB.y * h))
+            cv2.line(frame, pt1, pt2, _GREEN, 2, cv2.LINE_AA)
+
+    # Angle HUD (top-left panel)
+    panel_h = 130
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (315, 235), (10, 10, 10), -1)
-    cv2.addWeighted(overlay, 0.60, frame, 0.40, 0, frame)
+    cv2.rectangle(overlay, (0, 0), (270, panel_h), _BLACK, -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
-    def put(txt, y, col=(215, 215, 215), sc=0.50):
-        cv2.putText(frame, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 1, cv2.LINE_AA)
+    if angles is not None:
+        lines = [
+            (f"Flex  {angles.shoulder_flexion:+7.1f} deg", _GREEN),
+            (f"Abd   {angles.shoulder_abduction:+7.1f} deg", _ORANGE),
+            (f"Rot   {angles.shoulder_rotation:+7.1f} deg{'  *' if not rot_reliable else ''}", _WHITE),
+            (f"Elbow {angles.elbow_flexion:+7.1f} deg", (220, 80, 220)),
+        ]
+        for i, (text, color) in enumerate(lines):
+            cv2.putText(frame, text, (8, 20 + i * 27), _FONT, 0.55, color, 1, cv2.LINE_AA)
+    else:
+        cv2.putText(frame, "No pose detected", (8, 40), _FONT, 0.55, _RED, 1, cv2.LINE_AA)
 
-    put(f"DeepFusionPose  [{mode}]",             22,  (80, 200, 255), 0.55)
-    put(f"FPS {fps:4.1f}   Latency {latency:5.1f} ms", 42,  (140, 255, 140))
-    put(f"Filter {filter_name.upper()}   {'[LOG]' if logging_on else '[log off]'}", 60,
-        (0, 220, 100) if logging_on else (130, 130, 130))
-    put(f"Calib {'OK' if calibrated else 'NONE'}",   76,
-        (0, 220, 100) if calibrated else (80, 80, 220))
-
-    cv2.line(frame, (8, 86), (308, 86), (55, 55, 55), 1)
-    put(f"Shoulder Pitch  {angles.get('shoulder_elevation',0):6.1f}°", 102)
-    put(f"Shoulder Yaw    {angles.get('shoulder_yaw',0):6.1f}°",       118)
-    put(f"Shoulder Roll   {angles.get('shoulder_roll',0):6.1f}°",      134)
-    put(f"Elbow Flexion   {angles.get('elbow_flexion',0):6.1f}°",      150)
-    cv2.line(frame, (8, 160), (308, 160), (55, 55, 55), 1)
-    put("Q=Quit  C=Calib  L=Log  S=Snap  F=Filter", 176, (100, 100, 100), 0.42)
-    return frame
-
-
-# ── Calibration ───────────────────────────────────────────────────────────────
-def _run_calibration(cap, runner, filt, cal_mgr):
-    poses = [
-        ("arm_down",    "Hang arm DOWN at your side"),
-        ("arm_forward", "Extend arm FORWARD horizontally"),
-        ("elbow_flex",  "BEND elbow to ~90 degrees"),
+    # Status bar (bottom)
+    bar_y = h - 28
+    status_parts = [
+        f"FPS:{fps:4.1f}",
+        f"Filter:{filter_type}",
+        f"{'CAL' if calibrated else 'UNCAL'}",
+        f"{'REC' if logging else '---'}",
+        f"{'ROT-UNRELIABLE' if not rot_reliable else ''}",
     ]
-    for name, instr in poses:
-        print(f"\n  Calibration: {instr}  — press SPACE to capture, ESC to skip")
-        cal_mgr.start_calibration_pose(name)
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            lm  = runner.process(rgb)
-            cv2.putText(frame, instr, (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            cv2.putText(frame, "SPACE = capture  |  ESC = skip",
-                        (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-            if lm is not None:
-                fil = filt.update(compute_all(lm))
-                cv2.putText(frame, f"elbow={fil['elbow_flexion']:.1f}  pitch={fil['shoulder_elevation']:.1f}",
-                            (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
-            cv2.imshow("DeepFusionPose — Demo", frame)
-            k = cv2.waitKey(1) & 0xFF
-            if k == 32 and lm is not None:
-                cal_mgr.capture_pose(filt.update(compute_all(lm)))
-                break
-            if k == 27:
-                break
-    cal_mgr.finalize_calibration()
-    out = ROOT / "outputs" / "calibration.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cal_mgr.save(out)
-    print(f"  Calibration saved → {out}")
+    status = "  ".join(p for p in status_parts if p)
+    cv2.rectangle(frame, (0, bar_y - 5), (w, h), _BLACK, -1)
+    cv2.putText(frame, status, (6, h - 8), _FONT, 0.40, _GREY, 1, cv2.LINE_AA)
+    cv2.putText(frame, "Q=Quit  F=Filter  C=Calib  L=Log  R=Reset",
+                (6, bar_y - 8), _FONT, 0.38, _GREY, 1, cv2.LINE_AA)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser(description="DeepFusionPose — Final Demo")
-    ap.add_argument("--camera",      type=int, default=0)
-    ap.add_argument("--host",        default="127.0.0.1")
-    ap.add_argument("--port",        type=int, default=9000)
-    ap.add_argument("--filter",      default="kalman", choices=FILTER_NAMES)
-    ap.add_argument("--fusion_ckpt", default=str(ROOT / "outputs/models/fusion_best.pt"))
-    ap.add_argument("--gan_ckpt",    default=str(ROOT / "outputs/models/gan_generator_best.pt"))
-    ap.add_argument("--scaler",      default=str(ROOT / "outputs/models/fusion_scaler.json"))
-    ap.add_argument("--no_models",   action="store_true")
-    args = ap.parse_args()
+def _run_calibration_session(
+    cap: cv2.VideoCapture,
+    runner: MediaPipeRunner,
+    mgr: CalibrationManager,
+    save_path: Path,
+) -> bool:
+    """
+    Interactive calibration session.
+    Returns True if calibration was completed successfully.
+    """
+    pose_instructions = {
+        "arm_down":    "Let your right arm hang naturally at your side.",
+        "arm_forward": "Raise your right arm straight forward (shoulder height).",
+        "arm_side":    "Raise your right arm straight out to the right side.",
+        "elbow_bent":  "Bend your right elbow 90 degrees, upper arm at side.",
+    }
 
-    # Models
-    fusion_model = gan_model = scaler_data = dev = None
-    if not args.no_models:
-        fusion_model, gan_model, scaler_data, dev = _try_load_models(
-            args.fusion_ckpt, args.gan_ckpt, args.scaler)
-    mode = "Fusion+GAN" if fusion_model else "MediaPipe-only"
+    mgr.begin_static()
+    sample_counts: dict[str, list] = {p: [] for p in REQUIRED_POSES}
 
-    # Components
-    runner     = MediaPipeRunner()
-    fi         = FILTER_NAMES.index(args.filter)
-    filt       = AngleFilterSystem(FILTER_NAMES[fi])
-    cal_mgr    = CalibrationManager()
-    gesture    = GestureRecognizer()
-    logger     = AngleLogger(output_dir=ROOT / "outputs" / "sessions")
-    visualizer = AngleVisualizer()
-    streamer   = UdpAngleStreamer(host=args.host, port=args.port, hz=30)
+    pose_idx = 0
+    current_pose = REQUIRED_POSES[pose_idx]
+    collecting = False
+    collect_start = 0.0
+    COLLECT_S = 2.0  # collect for 2 seconds per pose
+    COLLECT_HZ = 30.0
 
-    # Camera
-    cap = cv2.VideoCapture(args.camera, cv2.CAP_MSMF)
+    print(f"\n[calibration] Starting. Hold each pose for {COLLECT_S:.0f}s when prompted.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.flip(frame, 1)
+        rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        lms   = runner.process(rgb)
+
+        instr = pose_instructions.get(current_pose, "")
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 80), _BLACK, -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        cv2.putText(frame, f"Calibration [{pose_idx+1}/{len(REQUIRED_POSES)}]: {current_pose}",
+                    (10, 25), _FONT, 0.6, _GREEN, 1, cv2.LINE_AA)
+        cv2.putText(frame, instr, (10, 50), _FONT, 0.5, _WHITE, 1, cv2.LINE_AA)
+
+        if collecting:
+            elapsed = time.perf_counter() - collect_start
+            progress = min(elapsed / COLLECT_S, 1.0)
+            bar_w = int(frame.shape[1] * progress)
+            cv2.rectangle(frame, (0, frame.shape[0] - 8), (bar_w, frame.shape[0]), _GREEN, -1)
+
+            if lms is not None:
+                angles = compute_arm_angles(lms)
+                if angles is not None:
+                    sample_counts[current_pose].append(angles)
+
+            if elapsed >= COLLECT_S:
+                # Average samples
+                samples = sample_counts[current_pose]
+                if samples:
+                    from src.processing.angle_solver import ArmAngles
+                    avg = ArmAngles(
+                        shoulder_flexion   = float(np.mean([s.shoulder_flexion   for s in samples])),
+                        shoulder_abduction = float(np.mean([s.shoulder_abduction for s in samples])),
+                        shoulder_rotation  = float(np.mean([s.shoulder_rotation  for s in samples])),
+                        elbow_flexion      = float(np.mean([s.elbow_flexion      for s in samples])),
+                        rotation_reliable  = samples[-1].rotation_reliable,
+                    )
+                    mgr._current_pose = current_pose
+                    mgr.capture_pose(avg)
+                    print(f"  [✓] {current_pose}: flex={avg.shoulder_flexion:.1f}  "
+                          f"abd={avg.shoulder_abduction:.1f}  "
+                          f"rot={avg.shoulder_rotation:.1f}  "
+                          f"elb={avg.elbow_flexion:.1f}")
+
+                pose_idx += 1
+                collecting = False
+                if pose_idx >= len(REQUIRED_POSES):
+                    break
+                current_pose = REQUIRED_POSES[pose_idx]
+        else:
+            cv2.putText(frame, "Press SPACE to capture this pose.",
+                        (10, 72), _FONT, 0.45, _ORANGE, 1, cv2.LINE_AA)
+
+        cv2.imshow("MonoArm — Calibration", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(" ") and not collecting:
+            collecting     = True
+            collect_start  = time.perf_counter()
+        elif key == ord("q"):
+            cv2.destroyWindow("MonoArm — Calibration")
+            return False
+
+    cv2.destroyWindow("MonoArm — Calibration")
+    mgr.finalise()
+    mgr.save(save_path)
+    print(f"[calibration] Complete. Saved to {save_path}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MonoArm live arm angle estimation.")
+    parser.add_argument("--camera",   type=int, default=0)
+    parser.add_argument("--port",     type=int, default=9000)
+    parser.add_argument("--host",     default="127.0.0.1")
+    parser.add_argument("--hz",       type=float, default=30.0)
+    parser.add_argument("--filter",   choices=["kalman", "ma", "sg"], default="kalman")
+    parser.add_argument("--calib",    default="calibration.json",
+                        help="Path to calibration file (auto-loaded if exists)")
+    parser.add_argument("--no-udp",   action="store_true", help="Disable UDP transmission")
+    parser.add_argument("--log-dir",  default="outputs/logs")
+    args = parser.parse_args()
+
+    # --- Setup ---
+    runner   = MediaPipeRunner()
+    filt     = AngleFilterBank(filter_type=args.filter, stream_hz=args.hz)
+    calib_mgr = CalibrationManager()
+    logger   = CsvAngleLogger(output_dir=args.log_dir, filter_type=args.filter)
+    plot     = RollingAnglePlot(width=640, height=180)
+
+    calib_path = Path(args.calib)
+    if calib_path.exists():
+        calib_mgr.load(calib_path)
+        print(f"[run_demo] Loaded calibration from {calib_path}")
+
+    sender: UdpAngleSender | None = None
+    if not args.no_udp:
+        sender = UdpAngleSender(host=args.host, port=args.port, hz=args.hz)
+        sender.start()
+        print(f"[run_demo] UDP streaming to {args.host}:{args.port}")
+
+    cap = cv2.VideoCapture(args.camera)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     if not cap.isOpened():
-        cap = cv2.VideoCapture(args.camera)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    for _ in range(10): cap.read()
-    time.sleep(0.3)
-    streamer.start()
+        print("[run_demo] Error: Cannot open camera.")
+        sys.exit(1)
 
-    # State
-    SEQ_LEN     = 60
-    ang_buf     = deque(maxlen=SEQ_LEN)
-    logging_on  = False
-    calibrated  = False
-    snap_n      = 0
-    frame_n     = 0
-    fps         = 0.0
-    latency_ms  = 0.0
-    t_fps       = time.perf_counter()
-    addr        = (args.host, args.port)
+    logging_active = False
+    filter_cycle   = ["kalman", "ma", "sg"]
+    filter_idx     = filter_cycle.index(args.filter)
+    fps_buf        = []
+    t_prev         = time.perf_counter()
 
-    print(f"\n  Mode: [{mode}]")
-    print("  Controls: Q=Quit  C=Calibrate  L=Log  S=Snapshot  F=Cycle-filter\n")
+    print("[run_demo] Running. Q=Quit  F=Filter  C=Calib  L=Log  R=Reset")
 
     try:
         while True:
-            t0 = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
-                continue
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            lm  = runner.process(rgb)
-
-            raw = {"shoulder_elevation": 0.0, "shoulder_yaw": 0.0,
-                   "shoulder_roll": 0.0, "elbow_flexion": 90.0}
-            if lm is not None:
-                raw = compute_all(lm)
-
-            fil = filt.update(raw)
-            if calibrated:
-                fil = cal_mgr.apply(fil)
-
-            # Gesture
-            g_name, g_conf = gesture.update({
-                "shoulder_pitch": fil.get("shoulder_elevation", 0),
-                "shoulder_yaw":   fil.get("shoulder_yaw", 0),
-                "shoulder_roll":  fil.get("shoulder_roll", 0),
-                "elbow_flexion":  fil.get("elbow_flexion", 90),
-            })
-
-            four = [fil.get("shoulder_elevation", 0),
-                    fil.get("shoulder_roll", 0),
-                    fil.get("shoulder_yaw", 0),
-                    fil.get("elbow_flexion", 90)]
-            ang_buf.append(four * 3)
-
-            fu_a = four
-            gr_a = four
-            unc  = 1.0
-
-            if fusion_model is not None and len(ang_buf) >= SEQ_LEN:
-                import torch
-                from src.models.fusion_network import mc_predict
-                col_min, col_max = scaler_data
-                seq  = np.array(list(ang_buf), dtype=np.float32)
-                rng  = col_max - col_min; rng[rng == 0] = 1.0
-                seq  = 2.0 * (seq - col_min) / rng - 1.0
-                x    = torch.tensor(seq).unsqueeze(0).to(dev)
-                m, s = mc_predict(fusion_model, x, n_samples=10)
-                fu_a = m[0, -1, :].tolist()
-                unc  = float(s[0, -1, :].mean())
-                with torch.no_grad():
-                    gr_a = gan_model(x)[0, -1, :].tolist()
-
-            # UDP → Unity
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _udp_send(sock, addr, "MP", four)
-            _udp_send(sock, addr, "MV", [v + np.random.normal(0, 2) for v in four])
-            _udp_send(sock, addr, "FU", fu_a + [unc])
-            _udp_send(sock, addr, "GR", gr_a)
-            sock.close()
-
-            if logging_on:
-                logger.log(fil)
-
-            frame_n += 1
-            latency_ms = (time.perf_counter() - t0) * 1000
-            if frame_n % 15 == 0:
-                fps = 15 / (time.perf_counter() - t_fps)
-                t_fps = time.perf_counter()
-
-            _draw_panel(frame, fil, fps, latency_ms, logging_on,
-                        FILTER_NAMES[fi], calibrated, mode)
-            draw_gesture_overlay(frame, g_name, g_conf)
-            cv2.imshow("DeepFusionPose — Demo", frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
                 break
-            elif key == ord('c'):
-                _run_calibration(cap, runner, filt, cal_mgr)
-                calibrated = True
-            elif key == ord('l'):
-                if not logging_on:
-                    logger.start(); logging_on = True
-                    print("  Logging started.")
+            frame = cv2.flip(frame, 1)
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # FPS estimate
+            now   = time.perf_counter()
+            fps_buf.append(1.0 / max(now - t_prev, 1e-6))
+            t_prev = now
+            if len(fps_buf) > 30:
+                fps_buf.pop(0)
+            fps = float(np.mean(fps_buf))
+
+            # Pose + angles
+            lms    = runner.process(rgb)
+            angles = compute_arm_angles(lms) if lms is not None else None
+
+            raw_angles = angles
+            if angles is not None:
+                angles = filt.update(angles)
+                angles = calib_mgr.apply(angles)
+                if sender is not None:
+                    sender.update(angles)
+                if logging_active:
+                    logger.log(angles)
+                plot.update(angles)
+
+            # Draw overlay
+            _draw_overlay(
+                frame,
+                lms,
+                angles,
+                fps,
+                filter_cycle[filter_idx],
+                logging_active,
+                calib_mgr.data.calibrated,
+                raw_angles.rotation_reliable if raw_angles else False,
+            )
+
+            # Compose plot below frame
+            plot_img = plot.render()
+            frame_h, frame_w = frame.shape[:2]
+            plot_resized = cv2.resize(plot_img, (frame_w, 180))
+            combined = np.vstack([frame, plot_resized])
+
+            cv2.imshow("MonoArm — Live", combined)
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("q"):
+                break
+            elif key == ord("f"):
+                filter_idx = (filter_idx + 1) % len(filter_cycle)
+                new_type   = filter_cycle[filter_idx]
+                filt       = AngleFilterBank(filter_type=new_type, stream_hz=args.hz)
+                logger._filter = new_type
+                print(f"[run_demo] Filter → {new_type}")
+            elif key == ord("c"):
+                if logging_active:
+                    logger.stop()
+                    logging_active = False
+                _run_calibration_session(cap, runner, calib_mgr, calib_path)
+            elif key == ord("l"):
+                if logging_active:
+                    logger.stop()
+                    logging_active = False
+                    print("[run_demo] Logging stopped.")
                 else:
-                    logger.stop(); logging_on = False
-                    visualizer.plot_history(logger)
-                    print("  Logging stopped + plot saved.")
-            elif key == ord('s'):
-                p = ROOT / "outputs" / f"snapshot_{snap_n:03d}.png"
-                p.parent.mkdir(parents=True, exist_ok=True)
-                cv2.imwrite(str(p), frame)
-                snap_n += 1
-                print(f"  Snapshot → {p}")
-            elif key == ord('f'):
-                fi = (fi + 1) % len(FILTER_NAMES)
-                filt = AngleFilterSystem(FILTER_NAMES[fi])
-                print(f"  Filter → {FILTER_NAMES[fi].upper()}")
+                    log_path = logger.start(calibrated=calib_mgr.data.calibrated)
+                    logging_active = True
+                    print(f"[run_demo] Logging → {log_path}")
+            elif key == ord("r"):
+                filt.reset()
+                print("[run_demo] Filters reset.")
 
     except KeyboardInterrupt:
         pass
     finally:
-        if logging_on:
+        if logging_active:
             logger.stop()
-            visualizer.plot_history(logger)
+        if sender is not None:
+            sender.stop()
         cap.release()
-        streamer.stop()
         runner.close()
         cv2.destroyAllWindows()
-        print("\n  Demo ended.")
+        print("[run_demo] Exited cleanly.")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,26 @@
-// UdpAngleReceiver.cs — Phase 8 update: receives 4-stream multi-avatar packets.
+// UdpAngleReceiver.cs
+// ===================
+// Receives arm joint angle packets from the MonoArm Python pipeline over UDP.
 //
-// Packet prefixes:
-//   MP,<pitch>,<roll>,<yaw>,<elbow>
-//   MV,<pitch>,<roll>,<yaw>,<elbow>
-//   FU,<pitch>,<roll>,<yaw>,<elbow>,<uncertainty>
-//   GR,<pitch>,<roll>,<yaw>,<elbow>
+// Packet Format
+// -------------
+//   S,<shoulder_flex>,<shoulder_abd>,<shoulder_rot>,<elbow_flex>\n
 //
-// Legacy S, prefix still supported for backward compatibility.
+//   All values are in degrees. The 'S' prefix denotes a single-arm pose.
+//
+// Threading Model
+// ---------------
+//   A background thread calls UdpClient.Receive() (blocking). When a packet
+//   arrives it is parsed into a pending ArmAngles struct under a lock.
+//   On the Unity main thread (Update()), the pending struct is copied into
+//   the public LatestAngles property under the same lock. This two-stage
+//   approach keeps the main thread non-blocking and avoids race conditions.
+//
+// Socket Options
+// --------------
+//   ReuseAddress is set so the OS releases the port immediately when the
+//   receiver is destroyed, preventing "address already in use" errors
+//   during rapid Enter/Exit Play mode cycles in the Unity Editor.
 
 using System;
 using System.Net;
@@ -15,48 +29,80 @@ using System.Text;
 using System.Threading;
 using UnityEngine;
 
-namespace PoseTrackReceiver
+namespace MonoArm
 {
+    /// <summary>
+    /// Anatomically labelled arm joint angles received from the Python pipeline.
+    /// All values are in degrees.
+    /// </summary>
+    public struct ArmAngles
+    {
+        /// <summary>Shoulder flexion (+) / extension (−) in degrees.</summary>
+        public float shoulderFlexion;
+
+        /// <summary>Shoulder abduction (+) / adduction (−) in degrees.</summary>
+        public float shoulderAbduction;
+
+        /// <summary>
+        /// Shoulder internal (+) / external (−) rotation in degrees.
+        /// Reliable only when elbow is flexed ≥ 25°.
+        /// </summary>
+        public float shoulderRotation;
+
+        /// <summary>Elbow flexion in degrees. 0° = fully extended.</summary>
+        public float elbowFlexion;
+
+        public override string ToString() =>
+            $"Flex:{shoulderFlexion:F1}° Abd:{shoulderAbduction:F1}° " +
+            $"Rot:{shoulderRotation:F1}° Elb:{elbowFlexion:F1}°";
+    }
+
+    /// <summary>
+    /// Threaded UDP receiver that delivers ArmAngles to the Unity main thread.
+    /// Attach to any persistent GameObject (e.g. a PoseManager empty object).
+    /// Only one instance may bind the configured port at a time.
+    /// </summary>
     public class UdpAngleReceiver : MonoBehaviour
     {
         [Header("Network")]
+        [Tooltip("UDP port to listen on. Must match Python stream_hz port (default 9000).")]
         public int listenPort = 9000;
 
-        public struct ArmAngles
-        {
-            public float shoulderPitch;
-            public float shoulderYaw;
-            public float shoulderRoll;
-            public float elbowFlex;
-            public float uncertainty;   // only populated for FU prefix
-        }
+        // ── Public state ────────────────────────────────────────────────────
+        /// <summary>Latest validated angles, updated each Unity frame.</summary>
+        public ArmAngles LatestAngles { get; private set; }
 
-        // Latest data per source
-        public ArmAngles Latest_MP { get; private set; }
-        public ArmAngles Latest_MV { get; private set; }
-        public ArmAngles Latest_FU { get; private set; }
-        public ArmAngles Latest_GR { get; private set; }
-        public ArmAngles Latest    { get; private set; }  // legacy
-
+        /// <summary>True once the first valid packet has been received.</summary>
         public bool HasData { get; private set; }
 
+        /// <summary>Total number of valid packets received in this session.</summary>
+        public int PacketCount { get; private set; }
+
+        /// <summary>Elapsed seconds since the last valid packet arrived.</summary>
+        public float TimeSinceLastPacket { get; private set; }
+
+        // ── Private state ───────────────────────────────────────────────────
         UdpClient     _client;
         Thread        _thread;
         volatile bool _running;
 
         readonly object _lock = new();
-        ArmAngles _pendingMP, _pendingMV, _pendingFU, _pendingGR, _pendingLegacy;
-        bool      _readyMP,   _readyMV,   _readyFU,   _readyGR,   _readyLegacy;
+        ArmAngles _pending;
+        bool      _pendingReady;
+        float     _lastPacketTime;
 
-        // Only one instance may bind the port at a time
+        // Singleton guard — one receiver per scene
         static UdpAngleReceiver _instance;
+
+        // ── Unity lifecycle ─────────────────────────────────────────────────
 
         void Awake()
         {
             if (_instance != null && _instance != this)
             {
-                Debug.LogWarning($"[UdpAngleReceiver] Duplicate on '{gameObject.name}' destroyed. " +
-                                 $"Only one receiver can bind port {listenPort}.");
+                Debug.LogWarning(
+                    $"[UdpAngleReceiver] Duplicate on '{gameObject.name}' destroyed. " +
+                    $"Only one receiver may bind port {listenPort}.");
                 Destroy(this);
                 return;
             }
@@ -70,55 +116,56 @@ namespace PoseTrackReceiver
             if (_instance == this) _instance = null;
         }
 
-        // Socket is managed by Awake/OnDestroy — not by enable/disable
-        void OnEnable()  { }
-        void OnDisable() { }
+        void Update()
+        {
+            TimeSinceLastPacket = Time.unscaledTime - _lastPacketTime;
+
+            lock (_lock)
+            {
+                if (!_pendingReady) return;
+                LatestAngles   = _pending;
+                _pendingReady  = false;
+                HasData        = true;
+                PacketCount++;
+                _lastPacketTime = Time.unscaledTime;
+            }
+        }
+
+        // ── Socket management ───────────────────────────────────────────────
 
         void StartReceiver()
         {
             try
             {
-                // ReuseAddress releases the port immediately on Stop,
-                // preventing "address in use" on rapid Play/Stop cycles in the Editor.
                 var sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
                 sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 sock.Bind(new IPEndPoint(IPAddress.Any, listenPort));
                 _client  = new UdpClient { Client = sock };
                 _running = true;
-                _thread  = new Thread(Receive) { IsBackground = true };
+                _thread  = new Thread(ReceiveLoop) { IsBackground = true, Name = "UdpReceiver" };
                 _thread.Start();
                 Debug.Log($"[UdpAngleReceiver] Listening on UDP port {listenPort}");
             }
             catch (SocketException ex)
             {
-                Debug.LogError($"[UdpAngleReceiver] Cannot bind port {listenPort}: {ex.Message}\n" +
-                               "Ensure no other GameObject has UdpAngleReceiver and no other " +
-                               "app is using this port.");
+                Debug.LogError(
+                    $"[UdpAngleReceiver] Cannot bind port {listenPort}: {ex.Message}\n" +
+                    "Ensure no other script has UdpAngleReceiver and the port is not in use.");
             }
         }
 
         void StopReceiver()
         {
             _running = false;
-            _client?.Close();
+            try { _client?.Close(); } catch { }
             _client = null;
             _thread?.Join(500);
             _thread = null;
         }
 
-        void Update()
-        {
-            lock (_lock)
-            {
-                if (_readyMP)    { Latest_MP = _pendingMP;       _readyMP    = false; HasData = true; }
-                if (_readyMV)    { Latest_MV = _pendingMV;       _readyMV    = false; HasData = true; }
-                if (_readyFU)    { Latest_FU = _pendingFU;       _readyFU    = false; HasData = true; }
-                if (_readyGR)    { Latest_GR = _pendingGR;       _readyGR    = false; HasData = true; }
-                if (_readyLegacy){ Latest     = _pendingLegacy;  _readyLegacy= false; HasData = true; }
-            }
-        }
+        // ── Background receive loop ─────────────────────────────────────────
 
-        void Receive()
+        void ReceiveLoop()
         {
             var ep = new IPEndPoint(IPAddress.Any, listenPort);
             while (_running)
@@ -127,53 +174,51 @@ namespace PoseTrackReceiver
                 {
                     byte[] data = _client.Receive(ref ep);
                     string line = Encoding.UTF8.GetString(data).Trim();
-                    if (string.IsNullOrEmpty(line)) continue;
 
-                    string prefix = line.Length >= 2 ? line.Substring(0, 2) : "";
-                    string body   = line.Length >  3 ? line.Substring(3)    : "";
+                    if (string.IsNullOrEmpty(line)) continue;
+                    if (!line.StartsWith("S,"))       continue;
+
+                    // Parse: S,flex,abd,rot,elbow
+                    if (!TryParsePacket(line.Substring(2), out ArmAngles angles)) continue;
 
                     lock (_lock)
                     {
-                        switch (prefix)
-                        {
-                            case "MP": if (TryParse4(body, out ArmAngles mp)) { _pendingMP = mp; _readyMP = true; } break;
-                            case "MV": if (TryParse4(body, out ArmAngles mv)) { _pendingMV = mv; _readyMV = true; } break;
-                            case "FU": if (TryParse5(body, out ArmAngles fu)) { _pendingFU = fu; _readyFU = true; } break;
-                            case "GR": if (TryParse4(body, out ArmAngles gr)) { _pendingGR = gr; _readyGR = true; } break;
-                            default:
-                                if (line.StartsWith("S,") && TryParse4(line.Substring(2), out ArmAngles leg))
-                                { _pendingLegacy = leg; _readyLegacy = true; }
-                                break;
-                        }
+                        _pending      = angles;
+                        _pendingReady = true;
                     }
                 }
-                catch (SocketException) { }
+                catch (SocketException)  { /* socket closed — exit loop */ break; }
                 catch (ObjectDisposedException) { break; }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[UdpAngleReceiver] Parse error: {ex.Message}");
+                }
             }
         }
 
-        static bool TryParse4(string body, out ArmAngles a)
+        // ── Packet parser ───────────────────────────────────────────────────
+
+        static bool TryParsePacket(string body, out ArmAngles a)
         {
             a = default;
-            var p = body.Split(',');
-            if (p.Length < 4) return false;
+            var  parts = body.Split(',');
+            if   (parts.Length < 4) return false;
+
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             var fl  = System.Globalization.NumberStyles.Float;
-            if (!float.TryParse(p[0], fl, inv, out float v0)) return false;
-            if (!float.TryParse(p[1], fl, inv, out float v1)) return false;
-            if (!float.TryParse(p[2], fl, inv, out float v2)) return false;
-            if (!float.TryParse(p[3], fl, inv, out float v3)) return false;
-            a = new ArmAngles { shoulderPitch = v0, shoulderRoll = v1, shoulderYaw = v2, elbowFlex = v3 };
-            return true;
-        }
 
-        static bool TryParse5(string body, out ArmAngles a)
-        {
-            if (!TryParse4(body, out a)) return false;
-            var p = body.Split(',');
-            if (p.Length >= 5 && float.TryParse(p[4], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float unc))
-                a.uncertainty = unc;
+            if (!float.TryParse(parts[0], fl, inv, out float flex))  return false;
+            if (!float.TryParse(parts[1], fl, inv, out float abd))   return false;
+            if (!float.TryParse(parts[2], fl, inv, out float rot))   return false;
+            if (!float.TryParse(parts[3], fl, inv, out float elbow)) return false;
+
+            a = new ArmAngles
+            {
+                shoulderFlexion   = flex,
+                shoulderAbduction = abd,
+                shoulderRotation  = rot,
+                elbowFlexion      = elbow,
+            };
             return true;
         }
     }

@@ -1,125 +1,227 @@
+"""
+angle_logger.py — Session Data Logging and Visualisation
+=========================================================
+
+Provides two complementary data recording tools:
+
+1. CsvAngleLogger
+   Writes one row per frame to a timestamped CSV file.
+   Columns: timestamp_s, frame, shoulder_flexion, shoulder_abduction,
+            shoulder_rotation, elbow_flexion, rotation_reliable, filter_type, calibrated
+
+2. RollingPlot
+   Maintains a rolling buffer of angle history and renders a live
+   four-panel plot onto an OpenCV image for real-time visualisation.
+   No matplotlib window is required; the plot is composited into the
+   main video frame for zero-overhead display.
+"""
+
+from __future__ import annotations
+
 import csv
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from collections import deque
+from typing import Optional
+
+import cv2
 import numpy as np
 
+from .angle_solver import ArmAngles
 
-class AngleLogger:
-    def __init__(self, output_dir: Optional[Path] = None):
-        if output_dir is None:
-            from config.config import ANGLES_DIR
-            output_dir = ANGLES_DIR
-        self.output_dir = output_dir
-        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.csv_path = None
-        self.csv_file = None
-        self.csv_writer = None
-        self.start_time = None
-        self.running = False
+# ---------------------------------------------------------------------------
+# CSV Logger
+# ---------------------------------------------------------------------------
 
-        self.angle_history = []
-        self.max_history = 1000
+class CsvAngleLogger:
+    """
+    Timestamped CSV logger for joint angle sessions.
 
-    def start(self, session_name: Optional[str] = None):
-        if session_name is None:
-            session_name = f"session_{int(time.time())}"
+    Parameters
+    ----------
+    output_dir : str or Path
+        Directory where log files are saved.
+    filter_type : str
+        Name of the active filter (for metadata).
+    session_label : str
+        Optional label appended to the filename.
+    """
 
-        self.csv_path = self.output_dir / f"{session_name}.csv"
-        self.csv_file = open(self.csv_path, 'w', newline='')
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow([
-            "timestamp", "elapsed_s",
-            "shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"
-        ])
+    COLUMNS = [
+        "timestamp_s", "frame",
+        "shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion",
+        "rotation_reliable", "filter_type", "calibrated",
+    ]
 
-        self.start_time = time.perf_counter()
-        self.running = True
-        print(f"Logging to {self.csv_path}")
+    def __init__(
+        self,
+        output_dir:    str | Path = "outputs/logs",
+        filter_type:   str = "kalman",
+        session_label: str = "",
+    ) -> None:
+        self._dir        = Path(output_dir)
+        self._filter     = filter_type
+        self._label      = session_label
+        self._file       = None
+        self._writer     = None
+        self._start_time = 0.0
+        self._frame      = 0
+        self._calibrated = False
 
-    def log(self, angles: Dict[str, float]):
-        if not self.running:
-            return
+    def start(self, calibrated: bool = False) -> Path:
+        """
+        Open the CSV file and write the header row.
 
-        elapsed = time.perf_counter() - self.start_time
-        self.csv_writer.writerow([
-            f"{time.time():.3f}",
-            f"{elapsed:.4f}",
-            f"{angles.get('shoulder_elevation', 0):.2f}",
-            f"{angles.get('shoulder_yaw', 0):.2f}",
-            f"{angles.get('shoulder_roll', 0):.2f}",
-            f"{angles.get('elbow_flexion', 0):.2f}"
-        ])
-        self.csv_file.flush()
+        Returns
+        -------
+        Path
+            Path to the opened log file.
+        """
+        self._dir.mkdir(parents=True, exist_ok=True)
+        ts    = time.strftime("%Y%m%d_%H%M%S")
+        label = f"_{self._label}" if self._label else ""
+        path  = self._dir / f"angles_{ts}{label}.csv"
 
-        self.angle_history.append({
-            'elapsed': elapsed,
-            **angles
+        self._file       = open(path, "w", newline="")
+        self._writer     = csv.DictWriter(self._file, fieldnames=self.COLUMNS)
+        self._writer.writeheader()
+        self._start_time = time.perf_counter()
+        self._frame      = 0
+        self._calibrated = calibrated
+        return path
+
+    def log(self, angles: ArmAngles) -> None:
+        """Write one row for the current frame."""
+        if self._writer is None:
+            raise RuntimeError("Call start() before log().")
+        self._writer.writerow({
+            "timestamp_s":        round(time.perf_counter() - self._start_time, 4),
+            "frame":              self._frame,
+            "shoulder_flexion":   round(angles.shoulder_flexion,   2),
+            "shoulder_abduction": round(angles.shoulder_abduction, 2),
+            "shoulder_rotation":  round(angles.shoulder_rotation,  2),
+            "elbow_flexion":      round(angles.elbow_flexion,      2),
+            "rotation_reliable":  int(angles.rotation_reliable),
+            "filter_type":        self._filter,
+            "calibrated":         int(self._calibrated),
         })
-        if len(self.angle_history) > self.max_history:
-            self.angle_history.pop(0)
+        self._frame += 1
 
-    def stop(self):
-        self.running = False
-        if self.csv_file:
-            self.csv_file.close()
-            print(f"Logging stopped. File: {self.csv_path}")
-
-    def get_statistics(self) -> Dict[str, float]:
-        if not self.angle_history:
-            return {}
-
-        keys = ["shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"]
-        stats = {}
-        for key in keys:
-            values = [a[key] for a in self.angle_history if key in a]
-            if values:
-                stats[f"{key}_mean"] = np.mean(values)
-                stats[f"{key}_std"] = np.std(values)
-                stats[f"{key}_min"] = np.min(values)
-                stats[f"{key}_max"] = np.max(values)
-        return stats
+    def stop(self) -> None:
+        """Flush and close the log file."""
+        if self._file is not None:
+            self._file.flush()
+            self._file.close()
+            self._file   = None
+            self._writer = None
 
 
-class AngleVisualizer:
-    def __init__(self):
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            self.plt = plt
-            self.available = True
-        except ImportError:
-            self.available = False
+# ---------------------------------------------------------------------------
+# Real-time rolling plot (OpenCV-based, no matplotlib dependency)
+# ---------------------------------------------------------------------------
 
-    def plot_history(self, logger: AngleLogger, output_path: Optional[Path] = None):
-        if not self.available or not logger.angle_history:
-            return
+class RollingAnglePlot:
+    """
+    Renders a live four-panel strip plot of joint angles onto an OpenCV
+    BGR image.  No external window is created; the image is returned and
+    composited by the caller into the main video display.
 
-        data = logger.angle_history
-        elapsed = [d['elapsed'] for d in data]
+    Parameters
+    ----------
+    width : int
+        Width of the output image in pixels.
+    height : int
+        Height of the output image in pixels.
+    history_len : int
+        Number of past frames shown in each panel.
+    y_range : tuple[float, float]
+        Y-axis range (degrees) for shoulder panels.
+    elbow_range : tuple[float, float]
+        Y-axis range (degrees) for the elbow panel.
+    """
 
-        fig, axes = self.plt.subplots(2, 2, figsize=(12, 8))
-        axes = axes.flatten()
+    _LABELS = ["Flex (°)", "Abd (°)", "Rot (°)", "Elbow (°)"]
+    _COLORS = [
+        (100, 220, 100),   # green  — flexion
+        (100, 160, 255),   # blue   — abduction
+        (255, 180,  80),   # orange — rotation
+        (220,  80, 220),   # purple — elbow
+    ]
+    _BG_COLOR  = (20, 20, 30)
+    _GRID_COLOR = (60, 60, 70)
+    _TEXT_COLOR = (200, 200, 200)
 
-        keys = ["shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"]
-        titles = ["Shoulder Elevation", "Shoulder Yaw", "Shoulder Roll", "Elbow Flexion"]
+    def __init__(
+        self,
+        width:        int = 640,
+        height:       int = 200,
+        history_len:  int = 150,
+        y_range:      tuple[float, float] = (-120.0, 120.0),
+        elbow_range:  tuple[float, float] = (0.0, 160.0),
+    ) -> None:
+        self._w    = width
+        self._h    = height
+        self._n    = history_len
+        self._yr   = y_range
+        self._er   = elbow_range
 
-        for i, (key, title) in enumerate(zip(keys, titles)):
-            values = [d.get(key, 0) for d in data]
-            axes[i].plot(elapsed, values)
-            axes[i].set_title(title)
-            axes[i].set_xlabel("Time (s)")
-            axes[i].set_ylabel("Angle (deg)")
-            axes[i].grid(True)
+        # One deque per DOF
+        self._bufs = [deque(maxlen=history_len) for _ in range(4)]
 
-        self.plt.tight_layout()
+    def update(self, angles: ArmAngles) -> None:
+        """Push new angle values into the rolling buffers."""
+        self._bufs[0].append(angles.shoulder_flexion)
+        self._bufs[1].append(angles.shoulder_abduction)
+        self._bufs[2].append(angles.shoulder_rotation)
+        self._bufs[3].append(angles.elbow_flexion)
 
-        if output_path is None:
-            from config.config import OUTPUTS_DIR
-            output_path = OUTPUTS_DIR / f"angle_plot_{int(time.time())}.png"
+    def render(self) -> np.ndarray:
+        """
+        Render the rolling plot and return a BGR image of shape (height, width, 3).
+        """
+        img    = np.full((self._h, self._w, 3), self._BG_COLOR, dtype=np.uint8)
+        n_dof  = 4
+        pw     = self._w // n_dof          # panel width
+        margin = 6
 
-        self.plt.savefig(output_path)
-        self.plt.close()
-        print(f"Plot saved to {output_path}")
+        for i, (buf, label, color) in enumerate(
+            zip(self._bufs, self._LABELS, self._COLORS)
+        ):
+            x0 = i * pw
+            x1 = x0 + pw
+            y_min, y_max = self._er if i == 3 else self._yr
+
+            # Panel background + border
+            cv2.rectangle(img, (x0, 0), (x1 - 1, self._h - 1), self._GRID_COLOR, 1)
+
+            # Zero line
+            zero_y = self._h - 1 - int((0 - y_min) / (y_max - y_min) * (self._h - 1))
+            zero_y = int(np.clip(zero_y, 0, self._h - 1))
+            cv2.line(img, (x0, zero_y), (x1, zero_y), self._GRID_COLOR, 1)
+
+            # Data trace
+            if len(buf) >= 2:
+                xs = np.linspace(x0 + margin, x1 - margin, self._n)
+                ys_raw = np.array(list(buf))
+                ys = self._h - 1 - (
+                    np.clip((ys_raw - y_min) / (y_max - y_min), 0, 1)
+                    * (self._h - 1)
+                ).astype(int)
+
+                n_pts = len(ys)
+                xs_trim = xs[self._n - n_pts:]
+                pts = np.column_stack([xs_trim.astype(int), ys]).reshape(-1, 1, 2)
+                cv2.polylines(img, [pts], isClosed=False, color=color, thickness=2, lineType=cv2.LINE_AA)
+
+                # Current value dot
+                cv2.circle(img, (int(xs_trim[-1]), int(ys[-1])), 4, color, -1, cv2.LINE_AA)
+
+            # Label + current value text
+            current = buf[-1] if buf else 0.0
+            cv2.putText(img, label, (x0 + 4, 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, self._TEXT_COLOR, 1, cv2.LINE_AA)
+            cv2.putText(img, f"{current:+.1f}", (x0 + 4, self._h - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+
+        return img

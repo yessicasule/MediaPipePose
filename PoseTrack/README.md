@@ -47,14 +47,46 @@ Unity Digital Twin
 ```bash
 pip install mediapipe opencv-python torch numpy scipy matplotlib
 ```
-
-### 2 — Run the full demo (no trained models needed)
-```bash
-# Terminal 1 — Start demo
-python scripts/run_demo.py
-
-# Terminal 2 — Open Unity → PoseTrack → Build 4-Avatar Scene → Press Play
+### Test Unity without a camera
+```powershell
+python scripts/mock_streamer.py --mode sinusoidal
 ```
+Then in Unity: **MonoArm → Build Scene**, save, Press Play.
+
+### Run live pipeline
+```powershell
+python scripts/run_demo.py --filter kalman
+```
+
+### Controls (run_demo.py)
+| Key | Action |
+|---|---|
+| Q | Quit |
+| F | Cycle filter (kalman → ma → sg) |
+| C | Run calibration wizard |
+| L | Toggle CSV logging |
+| R | Reset filters |
+
+## UDP Packet Format
+```
+S,<shoulder_flex>,<shoulder_abd>,<shoulder_rot>,<elbow_flex>\n
+```
+All values in degrees. Port 9000 (configurable).
+
+## Architecture
+```
+Camera → MediaPipe Pose → coordinate_frame.py → angle_solver.py
+       → angle_filter.py (Kalman/MA/SG) → calibration.py
+       → udp_streamer.py → Unity UdpAngleReceiver → AvatarMuscleController
+```
+
+## Shoulder Angle Convention
+- **Flexion (+)**: arm forward; **Extension (−)**: arm backward
+- **Abduction (+)**: arm out to side; **Adduction (−)**: arm crossing body
+- **Int. Rotation (+)**: palm inward; **Ext. Rotation (−)**: palm outward
+- **Elbow Flexion**: 0° = straight, ~150° = fully bent
+
+## Files Changed from Original 
 
 ### 3 — Run with trained models (after Kaggle training)
 ```bash

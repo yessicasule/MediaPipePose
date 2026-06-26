@@ -1,48 +1,48 @@
+#if UNITY_EDITOR
+// ArmRigSetup.cs
+// ===============
+// Custom Inspector for AvatarMuscleController.
+// Adds a diagnostic button that reports resolved muscle indices
+// and shows live muscle values in the Editor during Play mode.
+
+using UnityEditor;
 using UnityEngine;
 
-#if UNITY_EDITOR
-using UnityEditor;
-
-namespace PoseTrackReceiver
+namespace MonoArm
 {
-    [CustomEditor(typeof(ArmAngleController))]
+    [CustomEditor(typeof(AvatarMuscleController))]
     public class ArmRigSetup : Editor
     {
         public override void OnInspectorGUI()
         {
             DrawDefaultInspector();
 
-            var ctrl = (ArmAngleController)target;
-
+            var ctrl = (AvatarMuscleController)target;
             EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("Rig Auto-Setup", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("MonoArm Diagnostics", EditorStyles.boldLabel);
 
-            if (GUILayout.Button("Auto-Find Humanoid Bones"))
+            if (Application.isPlaying)
             {
-                var animator = ctrl.GetComponentInParent<Animator>();
-                if (animator == null)
-                    animator = ctrl.GetComponentInChildren<Animator>();
-
-                if (animator != null && animator.isHuman)
+                EditorGUILayout.LabelField("Live Muscle Values", EditorStyles.miniLabel);
+                using (new EditorGUI.DisabledScope(true))
                 {
-                    ctrl.upperArmBone = animator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
-                    ctrl.lowerArmBone = animator.GetBoneTransform(HumanBodyBones.LeftLowerArm);
-                    EditorUtility.SetDirty(ctrl);
-                    Debug.Log("[ArmRigSetup] Bones assigned from Humanoid rig.");
+                    EditorGUILayout.FloatField("Flexion",   ctrl.CurrentMuscleFlex);
+                    EditorGUILayout.FloatField("Abduction", ctrl.CurrentMuscleAbd);
+                    EditorGUILayout.FloatField("Rotation",  ctrl.CurrentMuscleRot);
+                    EditorGUILayout.FloatField("Elbow",     ctrl.CurrentMuscleElbow);
                 }
-                else
-                {
-                    EditorUtility.DisplayDialog("ArmRigSetup",
-                        "No Humanoid Animator found on this or parent GameObjects.\n" +
-                        "Assign bones manually in the Inspector.", "OK");
-                }
+                Repaint();   // refresh every frame during play
             }
-
-            EditorGUILayout.HelpBox(
-                "1. Attach this component to the same GameObject as UdpAngleReceiver.\n" +
-                "2. Click 'Auto-Find Humanoid Bones' or drag bones manually.\n" +
-                "3. Use 'shoulderAxisOffset' and 'elbowAxisOffset' to fix coordinate mismatch.",
-                MessageType.Info);
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "Muscle values shown here during Play mode.\n\n" +
+                    "Setup instructions:\n" +
+                    "1. Ensure your avatar FBX uses Animation Type = Humanoid.\n" +
+                    "2. Run  MonoArm → Build Scene  to wire all components.\n" +
+                    "3. Start the Python pipeline, then press Play.",
+                    MessageType.Info);
+            }
         }
     }
 }

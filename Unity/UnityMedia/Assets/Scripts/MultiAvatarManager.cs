@@ -1,98 +1,66 @@
-// MultiAvatarManager.cs — Phase 8: Unity Digital Twin controller.
+// MonoArmManager.cs
+// ===================
+// Main scene manager. Wires UdpAngleReceiver → AvatarMuscleController
+// and displays live status in the Debug Console and on a world-space HUD.
 //
-// Drives 4 avatar GameObjects from a single UdpAngleReceiver using
-// the corresponding data source (MediaPipe, MoveNet, Fusion, GAN).
-//
-// Setup (automatic via SceneBuilder or manual):
-//   1. Attach to any scene root GameObject.
-//   2. Assign the UdpAngleReceiver in the 'receiver' field.
-//   3. Drag the 4 ArmAngleController components into the avatar slots.
+// Setup
+// -----
+// 1. Create an empty GameObject named "MonoArmManager".
+// 2. Attach this component.
+// 3. Assign the UdpAngleReceiver and AvatarMuscleController references
+//    (or run MonoArm → Build Scene from the menu to do it automatically).
 
 using UnityEngine;
-using UnityEngine.UI;
 
-namespace PoseTrackReceiver
+namespace MonoArm
 {
-    public class MultiAvatarManager : MonoBehaviour
+    public class MonoArmManager : MonoBehaviour
     {
-        [Header("Shared Receiver (single UDP port)")]
-        public UdpAngleReceiver receiver;
+        [Header("References")]
+        public UdpAngleReceiver    receiver;
+        public AvatarMuscleController avatarController;
 
-        [Header("Avatar Controllers")]
-        public ArmAngleController avatarMediaPipe;
-        public ArmAngleController avatarMoveNet;
-        public ArmAngleController avatarFusion;
-        public ArmAngleController avatarGAN;
+        [Header("Status")]
+        [Tooltip("Log angle values to the console every N seconds (0 = disabled).")]
+        public float logIntervalSeconds = 5f;
 
-        [Header("Labels (optional Legacy UI.Text)")]
-        public Text labelMediaPipe;
-        public Text labelMoveNet;
-        public Text labelFusion;
-        public Text labelGAN;
-
-        [Header("Uncertainty badge on Fusion avatar (optional)")]
-        public Text uncertaintyText;
+        float _logTimer;
 
         void Start()
         {
             if (receiver == null)
-            {
-                Debug.LogError("[MultiAvatarManager] UdpAngleReceiver not assigned!");
-                return;
-            }
+                receiver = FindFirstObjectByType<UdpAngleReceiver>();
 
-            if (labelMediaPipe) labelMediaPipe.text = "MediaPipe (Raw)";
-            if (labelMoveNet)   labelMoveNet.text   = "MoveNet (Raw)";
-            if (labelFusion)    labelFusion.text    = "DeepFusionPose";
-            if (labelGAN)       labelGAN.text       = "GAN Refined";
+            if (avatarController == null)
+                avatarController = FindFirstObjectByType<AvatarMuscleController>();
+
+            if (receiver == null)
+                Debug.LogError("[MonoArmManager] UdpAngleReceiver not found in scene.");
+
+            if (avatarController == null)
+                Debug.LogError("[MonoArmManager] AvatarMuscleController not found in scene.");
         }
 
         void Update()
         {
-            if (receiver == null || !receiver.HasData) return;
+            if (receiver == null || avatarController == null) return;
+            if (!receiver.HasData) return;
 
-            // ── MediaPipe avatar ─────────────────────────────────────────────
-            if (avatarMediaPipe != null)
-                avatarMediaPipe.ApplyAngles(
-                    receiver.Latest_MP.shoulderPitch,
-                    receiver.Latest_MP.shoulderRoll,
-                    receiver.Latest_MP.shoulderYaw,
-                    receiver.Latest_MP.elbowFlex);
+            // Forward angles from receiver to avatar controller
+            avatarController.ApplyAngles(receiver.LatestAngles);
 
-            // ── MoveNet avatar ───────────────────────────────────────────────
-            if (avatarMoveNet != null)
-                avatarMoveNet.ApplyAngles(
-                    receiver.Latest_MV.shoulderPitch,
-                    receiver.Latest_MV.shoulderRoll,
-                    receiver.Latest_MV.shoulderYaw,
-                    receiver.Latest_MV.elbowFlex);
-
-            // ── Fusion avatar (with uncertainty badge) ───────────────────────
-            if (avatarFusion != null)
+            // Periodic console log
+            if (logIntervalSeconds > 0f)
             {
-                avatarFusion.ApplyAngles(
-                    receiver.Latest_FU.shoulderPitch,
-                    receiver.Latest_FU.shoulderRoll,
-                    receiver.Latest_FU.shoulderYaw,
-                    receiver.Latest_FU.elbowFlex);
-
-                if (uncertaintyText != null)
+                _logTimer += Time.deltaTime;
+                if (_logTimer >= logIntervalSeconds)
                 {
-                    float unc  = receiver.Latest_FU.uncertainty;
-                    float conf = 1f / (1f + unc);
-                    uncertaintyText.text  = $"Conf: {conf:P0}  ±{unc:F2}°";
-                    uncertaintyText.color = conf > 0.85f ? Color.green :
-                                            conf > 0.60f ? Color.yellow : Color.red;
+                    _logTimer = 0f;
+                    Debug.Log($"[MonoArmManager] pkts={receiver.PacketCount}  " +
+                              $"lag={receiver.TimeSinceLastPacket * 1000f:F0}ms  " +
+                              receiver.LatestAngles.ToString());
                 }
             }
-
-            // ── GAN avatar ───────────────────────────────────────────────────
-            if (avatarGAN != null)
-                avatarGAN.ApplyAngles(
-                    receiver.Latest_GR.shoulderPitch,
-                    receiver.Latest_GR.shoulderRoll,
-                    receiver.Latest_GR.shoulderYaw,
-                    receiver.Latest_GR.elbowFlex);
         }
     }
 }

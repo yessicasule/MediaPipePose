@@ -1,212 +1,166 @@
+// PoseDebugUI.cs
+// ===============
+// World-space debug panel showing live joint angle values beneath the avatar.
+// Parented to the avatar GameObject so it moves with it.
+// Works with the MonoArm single-avatar architecture.
+
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace PoseTrackReceiver
+namespace MonoArm
 {
-    /// <summary>
-    /// Places a world-space info panel directly below each avatar.
-    /// Panels are parented to the avatar so they move with it.
-    /// </summary>
     public class PoseDebugUI : MonoBehaviour
     {
+        [Header("References")]
         public UdpAngleReceiver receiver;
-        [Range(1f, 20f)] public float refreshHz = 10f;
 
-        // World-space panel config
-        const float PANEL_W     = 1.60f;   // world units wide
-        const float PANEL_H     = 1.20f;   // world units tall
-        const float PANEL_SCALE = 0.005f;  // canvas scale (world unit per pixel)
-        const float PANEL_Y     = -1.10f;  // below avatar root
-        const float PANEL_Z     = 0.05f;   // slightly in front
+        [Header("Display")]
+        [Range(1f, 30f)]
+        public float refreshHz = 10f;
 
-        Text[]  _labels = new Text[4];
-        float   _nextRefresh;
-        float   _lastDataTime;
-        int     _totalPackets;
+        // Panel geometry (world units)
+        const float PANEL_W     = 1.6f;
+        const float PANEL_H     = 1.1f;
+        const float PANEL_SCALE = 0.005f;
+        const float PANEL_Y     = -1.15f;
+        const float PANEL_Z     =  0.05f;
 
-        static readonly string[] NAMES  = { "MediaPipe", "MoveNet", "Fusion", "GAN" };
-        static readonly Color[]  COLORS = {
-            new Color(0.35f, 0.80f, 1.00f),   // cyan
-            new Color(1.00f, 0.72f, 0.20f),   // amber
-            new Color(0.30f, 1.00f, 0.50f),   // green
-            new Color(1.00f, 0.40f, 0.80f),   // pink
-        };
+        // Colour theme
+        static readonly Color ACCENT     = new(0.35f, 0.80f, 1.00f);   // MonoArm cyan
+        static readonly Color BG_COLOR   = new(0.05f, 0.05f, 0.08f, 0.88f);
+        static readonly Color TEXT_COLOR = Color.white;
+
+        Text   _dataLabel;
+        float  _nextRefresh;
+        float  _lastDataTime;
+        int    _pktCount;
 
         readonly StringBuilder _sb = new(256);
 
-        // ── Lifecycle ─────────────────────────────────────────────────────────
         void Awake()
         {
             if (receiver == null)
                 receiver = FindFirstObjectByType<UdpAngleReceiver>();
 
-            // Remove stray UI objects from old setup
-            foreach (var n in new[] { "New Text", "PoseHUD_Canvas" })
-            { var g = GameObject.Find(n); if (g) Destroy(g); }
-
-            AttachPanelsToAvatars();
+            BuildPanel();
         }
 
         void Update()
         {
             if (receiver == null) return;
-            if (receiver.HasData) { _totalPackets++; _lastDataTime = Time.unscaledTime; }
+            if (receiver.HasData)
+            {
+                _pktCount++;
+                _lastDataTime = Time.unscaledTime;
+            }
+
             if (Time.unscaledTime < _nextRefresh) return;
             _nextRefresh = Time.unscaledTime + 1f / Mathf.Max(refreshHz, 1f);
-            RefreshAll();
+            Refresh();
         }
 
-        // ── Find the 4 avatar roots via MultiAvatarManager ────────────────────
-        void AttachPanelsToAvatars()
+        void Refresh()
         {
-            var mgr = FindFirstObjectByType<MultiAvatarManager>();
-            if (mgr == null)
-            {
-                Debug.LogWarning("[PoseDebugUI] MultiAvatarManager not found — panels not created.");
-                return;
-            }
+            if (_dataLabel == null) return;
 
-            Transform[] roots = {
-                mgr.avatarMediaPipe != null ? mgr.avatarMediaPipe.transform : null,
-                mgr.avatarMoveNet   != null ? mgr.avatarMoveNet.transform   : null,
-                mgr.avatarFusion    != null ? mgr.avatarFusion.transform    : null,
-                mgr.avatarGAN       != null ? mgr.avatarGAN.transform       : null,
-            };
-
-            for (int i = 0; i < 4; i++)
-            {
-                if (roots[i] == null)
-                {
-                    Debug.LogWarning($"[PoseDebugUI] Avatar slot {i} ({NAMES[i]}) is null — skipping panel.");
-                    continue;
-                }
-                _labels[i] = CreateWorldPanel(roots[i], i);
-            }
-        }
-
-        // ── Create one world-space panel parented to an avatar ────────────────
-        Text CreateWorldPanel(Transform avatarRoot, int idx)
-        {
-            // Canvas GO — child of the avatar root
-            var cvGO   = new GameObject($"InfoPanel_{NAMES[idx]}");
-            cvGO.transform.SetParent(avatarRoot, false);
-            cvGO.transform.localPosition = new Vector3(0f, PANEL_Y, PANEL_Z);
-            cvGO.transform.localRotation = Quaternion.identity;
-            cvGO.transform.localScale    = Vector3.one * PANEL_SCALE;
-
-            var cv            = cvGO.AddComponent<Canvas>();
-            cv.renderMode     = RenderMode.WorldSpace;
-            cv.sortingOrder   = 10;
-            cvGO.AddComponent<CanvasScaler>();
-
-            // Size the canvas RectTransform
-            var cvRT       = cvGO.GetComponent<RectTransform>();
-            cvRT.sizeDelta = new Vector2(PANEL_W / PANEL_SCALE, PANEL_H / PANEL_SCALE);  // pixels
-
-            // Background panel
-            var bgGO  = new GameObject("BG");
-            bgGO.transform.SetParent(cvGO.transform, false);
-            var bgRT          = bgGO.AddComponent<RectTransform>();
-            bgRT.anchorMin    = Vector2.zero;
-            bgRT.anchorMax    = Vector2.one;
-            bgRT.offsetMin    = Vector2.zero;
-            bgRT.offsetMax    = Vector2.zero;
-            bgGO.AddComponent<Image>().color = new Color(0.05f, 0.05f, 0.08f, 0.88f);
-
-            // Coloured top accent bar (30px)
-            var barGO         = new GameObject("AccentBar");
-            barGO.transform.SetParent(cvGO.transform, false);
-            var barRT         = barGO.AddComponent<RectTransform>();
-            barRT.anchorMin   = new Vector2(0f, 1f);
-            barRT.anchorMax   = new Vector2(1f, 1f);
-            barRT.pivot       = new Vector2(0.5f, 1f);
-            barRT.offsetMin   = new Vector2(0f, -30f);
-            barRT.offsetMax   = new Vector2(0f,   0f);
-            barGO.AddComponent<Image>().color = COLORS[idx];
-
-            // Name label inside accent bar
-            var nameGO         = new GameObject("StreamName");
-            nameGO.transform.SetParent(cvGO.transform, false);
-            var nameRT         = nameGO.AddComponent<RectTransform>();
-            nameRT.anchorMin   = new Vector2(0f, 1f);
-            nameRT.anchorMax   = new Vector2(1f, 1f);
-            nameRT.pivot       = new Vector2(0.5f, 1f);
-            nameRT.offsetMin   = new Vector2(8f,  -30f);
-            nameRT.offsetMax   = new Vector2(-8f,  -2f);
-            var nameText       = nameGO.AddComponent<Text>();
-            nameText.text      = NAMES[idx];
-            nameText.font      = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            nameText.fontSize  = 22;
-            nameText.fontStyle = FontStyle.Bold;
-            nameText.color     = new Color(0.05f, 0.05f, 0.05f);
-            nameText.alignment = TextAnchor.MiddleCenter;
-
-            // Body text — fills panel below the accent bar
-            var textGO         = new GameObject("DataText");
-            textGO.transform.SetParent(cvGO.transform, false);
-            var textRT         = textGO.AddComponent<RectTransform>();
-            textRT.anchorMin   = new Vector2(0f, 0f);
-            textRT.anchorMax   = new Vector2(1f, 1f);
-            textRT.offsetMin   = new Vector2(14f,  10f);
-            textRT.offsetMax   = new Vector2(-14f, -36f);  // 36 = below accent bar
-
-            var txt                    = textGO.AddComponent<Text>();
-            txt.font                   = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            txt.fontSize               = 20;
-            txt.lineSpacing            = 1.25f;
-            txt.color                  = Color.white;
-            txt.alignment              = TextAnchor.UpperLeft;
-            txt.supportRichText        = true;
-            txt.horizontalOverflow     = HorizontalWrapMode.Overflow;
-            txt.verticalOverflow       = VerticalWrapMode.Overflow;
-
-            return txt;
-        }
-
-        // ── Refresh ───────────────────────────────────────────────────────────
-        void RefreshAll()
-        {
-            bool waiting = receiver == null || !receiver.HasData;
-            float  age   = Time.unscaledTime - _lastDataTime;
-            string warn  = (!waiting && age > 0.5f) ? "  <color=#f55>⚠</color>" : "";
+            bool   waiting = !receiver.HasData;
+            float  age     = Time.unscaledTime - _lastDataTime;
+            string warn    = (!waiting && age > 0.5f) ? "  <color=#f55>⚠ stale</color>" : "";
 
             if (waiting)
             {
-                for (int i = 0; i < 4; i++)
-                    if (_labels[i]) _labels[i].text = "<color=#555>Waiting for data…</color>";
+                _dataLabel.text = "<color=#555>Waiting for Python stream…\nRun scripts/run_demo.py</color>";
                 return;
             }
 
-            Write(0, receiver.Latest_MP, age, warn, false);
-            Write(1, receiver.Latest_MV, age, warn, false);
-            Write(2, receiver.Latest_FU, age, warn, true);
-            Write(3, receiver.Latest_GR, age, warn, false);
-        }
-
-        void Write(int i, UdpAngleReceiver.ArmAngles a,
-                   float age, string warn, bool showConf)
-        {
-            if (!_labels[i]) return;
+            ArmAngles a = receiver.LatestAngles;
             _sb.Clear();
 
-            string row(string label, float val) =>
-                $"<color=#999>{label,-6}</color>  <b>{val,6:F1}°</b>\n";
+            string Row(string lbl, float val, string color) =>
+                $"<color=#aaa>{lbl,-5}</color>  <color={color}><b>{val,+7:F1}°</b></color>\n";
 
-            _sb.Append(row("Pitch",  a.shoulderPitch));
-            _sb.Append(row("Roll",   a.shoulderRoll));
-            _sb.Append(row("Yaw",    a.shoulderYaw));
-            _sb.Append(row("Elbow",  a.elbowFlex));
+            _sb.Append(Row("Flex",  a.shoulderFlexion,   "#64dc64"));  // green
+            _sb.Append(Row("Abd",   a.shoulderAbduction,  "#64a0ff"));  // blue
+            _sb.Append(Row("Rot",   a.shoulderRotation,   "#ffb450"));  // orange
+            _sb.Append(Row("Elbow", a.elbowFlexion,       "#dc50dc"));  // purple
+            _sb.Append($"\n<color=#444>pkts {_pktCount}   {age * 1000f:F0}ms{warn}</color>");
 
-            if (showConf)
-            {
-                float  c  = 1f / (1f + a.uncertainty);
-                string cc = c > 0.85f ? "55ee77" : c > 0.6f ? "ffcc33" : "ff5555";
-                _sb.Append($"<color=#999>{"Conf",-6}</color>  <color=#{cc}><b>{c:P0}</b></color>\n");
-            }
+            _dataLabel.text = _sb.ToString();
+        }
 
-            _sb.Append($"\n<color=#444>pkts {_totalPackets}   {age:F2}s{warn}</color>");
-            _labels[i].text = _sb.ToString();
+        void BuildPanel()
+        {
+            // Canvas parented to avatar root
+            var cvGO = new GameObject("MonoArm_DebugPanel");
+            cvGO.transform.SetParent(transform, false);
+            cvGO.transform.localPosition = new Vector3(0f, PANEL_Y, PANEL_Z);
+            cvGO.transform.localScale    = Vector3.one * PANEL_SCALE;
+
+            var cv         = cvGO.AddComponent<Canvas>();
+            cv.renderMode  = RenderMode.WorldSpace;
+            cv.sortingOrder = 10;
+            cvGO.AddComponent<CanvasScaler>();
+
+            var rt         = cvGO.GetComponent<RectTransform>();
+            rt.sizeDelta   = new Vector2(PANEL_W / PANEL_SCALE, PANEL_H / PANEL_SCALE);
+
+            // Background
+            var bg = new GameObject("BG");
+            bg.transform.SetParent(cvGO.transform, false);
+            var bgRT = bg.AddComponent<RectTransform>();
+            bgRT.anchorMin  = Vector2.zero;
+            bgRT.anchorMax  = Vector2.one;
+            bgRT.offsetMin  = Vector2.zero;
+            bgRT.offsetMax  = Vector2.zero;
+            bg.AddComponent<Image>().color = BG_COLOR;
+
+            // Accent bar
+            var bar = new GameObject("AccentBar");
+            bar.transform.SetParent(cvGO.transform, false);
+            var barRT = bar.AddComponent<RectTransform>();
+            barRT.anchorMin  = new Vector2(0f, 1f);
+            barRT.anchorMax  = new Vector2(1f, 1f);
+            barRT.pivot      = new Vector2(0.5f, 1f);
+            barRT.offsetMin  = new Vector2(0f, -30f);
+            barRT.offsetMax  = new Vector2(0f,   0f);
+            bar.AddComponent<Image>().color = ACCENT;
+
+            // Title label in accent bar
+            var titleGO  = new GameObject("Title");
+            titleGO.transform.SetParent(cvGO.transform, false);
+            var titleRT  = titleGO.AddComponent<RectTransform>();
+            titleRT.anchorMin = new Vector2(0f, 1f);
+            titleRT.anchorMax = new Vector2(1f, 1f);
+            titleRT.pivot     = new Vector2(0.5f, 1f);
+            titleRT.offsetMin = new Vector2(8f, -30f);
+            titleRT.offsetMax = new Vector2(-8f, -2f);
+            var titleTxt      = titleGO.AddComponent<Text>();
+            titleTxt.text      = "MonoArm  |  Right Arm";
+            titleTxt.font      = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            titleTxt.fontSize  = 22;
+            titleTxt.fontStyle = FontStyle.Bold;
+            titleTxt.color     = new Color(0.05f, 0.05f, 0.05f);
+            titleTxt.alignment = TextAnchor.MiddleCenter;
+
+            // Data text
+            var dataGO  = new GameObject("DataText");
+            dataGO.transform.SetParent(cvGO.transform, false);
+            var dataRT  = dataGO.AddComponent<RectTransform>();
+            dataRT.anchorMin  = new Vector2(0f, 0f);
+            dataRT.anchorMax  = new Vector2(1f, 1f);
+            dataRT.offsetMin  = new Vector2(14f,  10f);
+            dataRT.offsetMax  = new Vector2(-14f, -36f);
+
+            _dataLabel              = dataGO.AddComponent<Text>();
+            _dataLabel.font         = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            _dataLabel.fontSize     = 20;
+            _dataLabel.lineSpacing  = 1.3f;
+            _dataLabel.color        = TEXT_COLOR;
+            _dataLabel.alignment    = TextAnchor.UpperLeft;
+            _dataLabel.supportRichText      = true;
+            _dataLabel.horizontalOverflow   = HorizontalWrapMode.Overflow;
+            _dataLabel.verticalOverflow     = VerticalWrapMode.Overflow;
         }
     }
 }

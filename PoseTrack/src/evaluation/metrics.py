@@ -1,73 +1,256 @@
+"""
+metrics.py — Evaluation Metrics for MonoArm Validation
+========================================================
+
+Provides a complete set of metrics used to evaluate pose estimation accuracy
+against Human3.6M ground truth, matching the reporting standards common in
+IEEE conference papers on human pose estimation.
+
+Metrics
+-------
+    MAE  — Mean Absolute Error (degrees): primary accuracy metric
+    RMSE — Root Mean Squared Error (degrees): sensitive to outliers
+    r    — Pearson correlation coefficient: linearity of tracking
+    MPJAE— Mean Per-Joint Angle Error: per-DOF breakdown
+    PCK  — Percentage of Correct Keypoints at threshold θ:
+             fraction of frames where |pred - gt| < θ°
+    Jitter— Mean absolute frame-to-frame change: proxy for stability
+    Bias  — Mean signed error (degrees): systematic offset direction
+
+All metrics are computed per-joint and then averaged (macro-average).
+The primary reported metric is MPJAE following the convention of:
+    Mehta et al. (2017), VNect: Real-time 3D Human Pose Estimation
+    with a Single RGB Camera. ACM TOG 36(4).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Sequence
+
 import numpy as np
 
-def compute_fps(total_frames: int, duration_seconds: float) -> float:
-    if duration_seconds <= 0:
-        return 0.0
-    return total_frames / duration_seconds
 
-def compute_jitter(angles_list: list) -> float:
-    """
-    Computes frame-to-frame variance (jitter).
-    angles_list: list of angle values for a specific joint across frames.
-    Returns the mean absolute difference between consecutive frames.
-    """
-    if len(angles_list) < 2:
-        return 0.0
-    diffs = np.abs(np.diff(angles_list))
-    return float(np.mean(diffs))
+# ── Data types ───────────────────────────────────────────────────────────────
 
-def compute_failure_rate(total_frames: int, valid_frames: int) -> float:
-    """
-    % of frames with missing keypoints or lost tracking.
-    """
-    if total_frames == 0:
-        return 0.0
-    failed_frames = total_frames - valid_frames
-    return (failed_frames / total_frames) * 100.0
+JOINTS = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
+JOINT_LABELS = {
+    "shoulder_flexion":   "Shoulder Flexion",
+    "shoulder_abduction": "Shoulder Abduction",
+    "shoulder_rotation":  "Shoulder Rotation",
+    "elbow_flexion":      "Elbow Flexion",
+}
 
-def compute_static_pose_stability(angles_list: list) -> float:
-    """
-    Validates static holding. Expected standard deviation < 5°
-    """
-    if len(angles_list) < 2:
-        return 0.0
-    return float(np.std(angles_list))
 
-def validate_static_pose(angles_list: list, threshold: float = 5.0) -> bool:
-    """
-    Returns True if the pose is considered stable (std dev < threshold).
-    """
-    return compute_static_pose_stability(angles_list) < threshold
+@dataclass
+class JointMetrics:
+    """All metrics for a single joint DOF."""
+    joint:     str
+    n:         int
+    mae:       float    # Mean Absolute Error (degrees)
+    rmse:      float    # Root Mean Squared Error (degrees)
+    bias:      float    # Mean signed error (degrees)  pred − gt
+    r:         float    # Pearson correlation coefficient
+    pck_5:     float    # % frames within ±5°
+    pck_10:    float    # % frames within ±10°
+    pck_15:    float    # % frames within ±15°
+    jitter:    float    # Mean |Δangle| frame-to-frame (predicted signal)
 
-def evaluate_session(tracking_data: dict) -> dict:
+
+@dataclass
+class FrameworkMetrics:
+    """Complete evaluation results for one pose estimation framework."""
+    framework:       str
+    n_frames:        int
+    joints:          dict[str, JointMetrics] = field(default_factory=dict)
+    # Aggregate (macro-average over joints)
+    mpjae:           float = 0.0   # Mean Per-Joint Angle Error
+    mean_rmse:       float = 0.0
+    mean_r:          float = 0.0
+    mean_pck_5:      float = 0.0
+    mean_pck_10:     float = 0.0
+    mean_jitter:     float = 0.0
+
+
+# ── Per-joint computation ────────────────────────────────────────────────────
+
+def compute_joint_metrics(
+    joint:   str,
+    pred:    np.ndarray,
+    gt:      np.ndarray,
+) -> JointMetrics:
     """
-    Consolidates session evaluation.
-    tracking_data format:
-    {
-        "total_time": 10.5,
-        "total_frames": 315,
-        "valid_frames": 300,
-        "joints": {
-            "elbow_flexion": [90.1, 90.2, 90.1, ...],
-            ...
+    Compute all metrics for one joint given arrays of predicted and GT angles.
+
+    Parameters
+    ----------
+    joint : str
+        Joint name (e.g. "shoulder_flexion").
+    pred : np.ndarray, shape (N,)
+        Predicted angles in degrees.
+    gt : np.ndarray, shape (N,)
+        Ground-truth angles in degrees.
+
+    Returns
+    -------
+    JointMetrics
+    """
+    assert len(pred) == len(gt), f"Length mismatch: pred={len(pred)}, gt={len(gt)}"
+    n   = len(pred)
+    err = pred - gt
+
+    mae  = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err ** 2)))
+    bias = float(np.mean(err))
+
+    # Pearson r (handle zero-variance case)
+    if np.std(pred) > 1e-9 and np.std(gt) > 1e-9:
+        r = float(np.corrcoef(pred, gt)[0, 1])
+    else:
+        r = float("nan")
+
+    # PCK at 5°, 10°, 15°
+    abs_err = np.abs(err)
+    pck_5  = float(np.mean(abs_err <  5.0) * 100.0)
+    pck_10 = float(np.mean(abs_err < 10.0) * 100.0)
+    pck_15 = float(np.mean(abs_err < 15.0) * 100.0)
+
+    # Jitter: mean absolute frame-to-frame change in predicted signal
+    jitter = float(np.mean(np.abs(np.diff(pred)))) if n > 1 else 0.0
+
+    return JointMetrics(
+        joint=joint, n=n,
+        mae=mae, rmse=rmse, bias=bias, r=r,
+        pck_5=pck_5, pck_10=pck_10, pck_15=pck_15,
+        jitter=jitter,
+    )
+
+
+# ── Full framework evaluation ─────────────────────────────────────────────────
+
+def evaluate_framework(
+    framework: str,
+    pred_arrays: dict[str, np.ndarray],   # joint → predicted angles
+    gt_arrays:   dict[str, np.ndarray],   # joint → GT angles
+    joints: list[str] | None = None,
+) -> FrameworkMetrics:
+    """
+    Evaluate one framework against ground truth across all joints.
+
+    Parameters
+    ----------
+    framework : str
+        Framework display name.
+    pred_arrays : dict[str, np.ndarray]
+        Predicted angle arrays keyed by joint name.
+    gt_arrays : dict[str, np.ndarray]
+        Ground-truth angle arrays keyed by joint name.
+    joints : list[str], optional
+        Which joints to evaluate. Defaults to JOINTS.
+
+    Returns
+    -------
+    FrameworkMetrics
+    """
+    joints = joints or JOINTS
+    n      = len(next(iter(gt_arrays.values())))
+    result = FrameworkMetrics(framework=framework, n_frames=n)
+
+    maes, rmses, rs, pck5s, jitters = [], [], [], [], []
+
+    for j in joints:
+        if j not in pred_arrays or j not in gt_arrays:
+            continue
+        jm = compute_joint_metrics(j, pred_arrays[j], gt_arrays[j])
+        result.joints[j] = jm
+        maes.append(jm.mae)
+        rmses.append(jm.rmse)
+        if not np.isnan(jm.r):
+            rs.append(jm.r)
+        pck5s.append(jm.pck_5)
+        jitters.append(jm.jitter)
+
+    result.mpjae      = float(np.mean(maes))      if maes    else float("nan")
+    result.mean_rmse  = float(np.mean(rmses))     if rmses   else float("nan")
+    result.mean_r     = float(np.mean(rs))        if rs      else float("nan")
+    result.mean_pck_5 = float(np.mean(pck5s))     if pck5s   else float("nan")
+    result.mean_jitter = float(np.mean(jitters))  if jitters else float("nan")
+
+    return result
+
+
+# ── Reporting ─────────────────────────────────────────────────────────────────
+
+def print_metrics_table(all_results: list[FrameworkMetrics]) -> None:
+    """Print a formatted comparison table to stdout."""
+    names = [r.framework for r in all_results]
+    col_w = max(16, max(len(n) for n in names) + 2)
+    sep   = "─" * (28 + col_w * len(names))
+
+    def row(label, vals):
+        print(f"  {label:<26}", end="")
+        for v in vals:
+            print(f"{str(v):>{col_w}}", end="")
+        print()
+
+    print("\n" + "═" * (28 + col_w * len(names)))
+    print("  VALIDATION AGAINST H3.6M GROUND TRUTH")
+    print("═" * (28 + col_w * len(names)))
+    row("Framework",       names)
+    row(sep[:26],          [sep[:col_w]] * len(names))
+    row("N frames",        [str(r.n_frames)                  for r in all_results])
+    row("MPJAE (°) ↓",    [f"{r.mpjae:.2f}"                 for r in all_results])
+    row("Mean RMSE (°) ↓", [f"{r.mean_rmse:.2f}"            for r in all_results])
+    row("Pearson r ↑",     [f"{r.mean_r:.3f}"               for r in all_results])
+    row("PCK@5° ↑",        [f"{r.mean_pck_5:.1f}%"          for r in all_results])
+    row("Jitter (°/fr) ↓", [f"{r.mean_jitter:.2f}"          for r in all_results])
+    row(sep[:26],          [sep[:col_w]] * len(names))
+
+    # Per-joint breakdown
+    for j in JOINTS:
+        label = JOINT_LABELS[j]
+        row(f"{label[:24]} MAE",
+            [f"{r.joints[j].mae:.2f}°" if j in r.joints else "N/A"
+             for r in all_results])
+
+    print("═" * (28 + col_w * len(names)))
+
+    # Winner summary
+    valid = [r for r in all_results if not np.isnan(r.mpjae)]
+    if len(valid) >= 2:
+        best = min(valid, key=lambda r: r.mpjae)
+        print(f"\n  🏆 Best overall MPJAE: {best.framework}  ({best.mpjae:.2f}°)")
+        best_r = max(valid, key=lambda r: r.mean_r)
+        print(f"  🏆 Best correlation:   {best_r.framework}  (r={best_r.mean_r:.3f})")
+        best_pck = max(valid, key=lambda r: r.mean_pck_5)
+        print(f"  🏆 Best PCK@5°:        {best_pck.framework}  ({best_pck.mean_pck_5:.1f}%)\n")
+
+
+def metrics_to_dict(results: list[FrameworkMetrics]) -> list[dict]:
+    """Serialise FrameworkMetrics to a plain dict for JSON export."""
+    out = []
+    for r in results:
+        d: dict = {
+            "framework":    r.framework,
+            "n_frames":     r.n_frames,
+            "mpjae":        r.mpjae,
+            "mean_rmse":    r.mean_rmse,
+            "mean_r":       r.mean_r,
+            "mean_pck_5":   r.mean_pck_5,
+            "mean_pck_10":  max((jm.pck_10 for jm in r.joints.values()), default=0.0),
+            "mean_jitter":  r.mean_jitter,
+            "joints":       {},
         }
-    }
-    """
-    report = {
-        "fps": compute_fps(tracking_data.get("total_frames", 0), tracking_data.get("total_time", 0.0)),
-        "failure_rate_percent": compute_failure_rate(
-            tracking_data.get("total_frames", 0), 
-            tracking_data.get("valid_frames", 0)
-        ),
-        "joint_metrics": {}
-    }
-    
-    joints = tracking_data.get("joints", {})
-    for joint_name, angles in joints.items():
-        report["joint_metrics"][joint_name] = {
-            "jitter": compute_jitter(angles),
-            "stability_std": compute_static_pose_stability(angles),
-            "is_stable": validate_static_pose(angles)
-        }
-        
-    return report
+        for j, jm in r.joints.items():
+            d["joints"][j] = {
+                "mae":    jm.mae,
+                "rmse":   jm.rmse,
+                "bias":   jm.bias,
+                "r":      jm.r if not np.isnan(jm.r) else None,
+                "pck_5":  jm.pck_5,
+                "pck_10": jm.pck_10,
+                "pck_15": jm.pck_15,
+                "jitter": jm.jitter,
+            }
+        out.append(d)
+    return out

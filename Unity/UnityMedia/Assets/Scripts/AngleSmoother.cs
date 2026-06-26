@@ -1,22 +1,53 @@
+// AngleSmoother.cs
+// =================
+// Simple per-channel exponential smoother using Mathf.SmoothDampAngle.
+// Used inside AvatarMuscleController as a fallback for any values
+// that still need separate smoothing outside the muscle pipeline.
+//
+// Note: The primary smoothing in MonoArm is done via SmoothDamp
+// directly on muscle values inside AvatarMuscleController. This class
+// is retained for optional external use (e.g. debug overlay angles).
+
 using UnityEngine;
 
-namespace PoseTrackReceiver
+namespace MonoArm
 {
     public class AngleSmoother
     {
-        readonly float _alpha;
-        float _value;
+        float _current;
+        float _velocity;
+        readonly float _smoothTime;
         bool  _init;
 
-        public AngleSmoother(float smoothing = 0.15f) => _alpha = Mathf.Clamp01(smoothing);
-
-        public float Update(float raw)
+        /// <param name="smoothTime">
+        /// Approximate time (seconds) to reach the target value.
+        /// Smaller = more responsive; larger = smoother.
+        /// </param>
+        public AngleSmoother(float smoothTime = 0.08f)
         {
-            if (!_init) { _value = raw; _init = true; return raw; }
-            _value = Mathf.LerpAngle(_value, raw, _alpha);
-            return _value;
+            _smoothTime = smoothTime;
         }
 
-        public void Reset() => _init = false;
+        /// <summary>Feed a new raw angle (degrees) and get the smoothed value.</summary>
+        public float Update(float rawAngle)
+        {
+            if (!_init)
+            {
+                _current = rawAngle;
+                _init    = true;
+                return rawAngle;
+            }
+            _current = Mathf.SmoothDampAngle(_current, rawAngle, ref _velocity,
+                                              _smoothTime, Mathf.Infinity, Time.deltaTime);
+            return _current;
+        }
+
+        public void Reset()
+        {
+            _init     = false;
+            _velocity = 0f;
+        }
+
+        public float Current => _current;
     }
 }

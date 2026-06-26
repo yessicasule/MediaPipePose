@@ -1,68 +1,165 @@
 """
-mock_streamer.py — Test Unity WITHOUT trained models.
+mock_streamer.py — Simulated Angle Data Generator for Unity Testing
+====================================================================
 
-Sends realistic animated arm angle data over UDP to Unity
-so you can verify the scene wiring before Kaggle models are ready.
+Sends simulated arm joint angles over UDP in the MonoArm packet format:
+    S,<shoulder_flex>,<shoulder_abd>,<shoulder_rot>,<elbow_flex>\\n
 
-Simulates 4 streams (MP, MV, FU, GR) with sinusoidal motion
-that makes the arm visibly move up/down and bend.
+This allows the entire Unity side to be developed and tested without a
+camera or the vision pipeline running.
 
-Usage:
-    python mock_streamer.py
-    python mock_streamer.py --host 127.0.0.1 --port 9000 --fps 30
+Modes
+-----
+    sinusoidal  : All DOFs follow independent sinusoidal sweeps.
+    step        : Angles jump between defined positions at a fixed interval.
+    static      : All angles held at zero (useful for testing jitter).
+    random      : Angles undergo a bounded random walk.
+
+Usage
+-----
+    python scripts/mock_streamer.py --mode sinusoidal --hz 30
+    python scripts/mock_streamer.py --mode step --hz 20
 """
-import argparse, math, socket, time
 
-def send(sock, addr, prefix, values):
-    body = ",".join(f"{v:.3f}" for v in values)
-    sock.sendto(f"{prefix},{body}".encode(), addr)
+from __future__ import annotations
 
-def run(host, port, fps):
+import argparse
+import math
+import random
+import socket
+import sys
+import time
+
+
+def _fmt(flex: float, abd: float, rot: float, elb: float) -> bytes:
+    """Format one UDP packet."""
+    return f"S,{flex:.2f},{abd:.2f},{rot:.2f},{elb:.2f}\n".encode("utf-8")
+
+
+def run_sinusoidal(sock: socket.socket, addr: tuple, hz: float) -> None:
+    """
+    Sinusoidal sweep across all DOFs with different periods.
+    Shoulder flexion: 5 s period, ±70°
+    Shoulder abduction: 7 s period, 0–80°
+    Shoulder rotation: 9 s period, ±40°
+    Elbow flexion: 4 s period, 0–130°
+    """
+    interval = 1.0 / hz
+    t0 = time.perf_counter()
+    target = t0
+    print("[mock_streamer] Mode: sinusoidal — press Ctrl+C to stop")
+    while True:
+        t = time.perf_counter() - t0
+        flex = 70.0  * math.sin(2 * math.pi * t / 5.0)
+        abd  = 40.0  * (1 - math.cos(2 * math.pi * t / 7.0))
+        rot  = 40.0  * math.sin(2 * math.pi * t / 9.0)
+        elb  = 65.0  * (1 - math.cos(2 * math.pi * t / 4.0))
+        sock.sendto(_fmt(flex, abd, rot, elb), addr)
+        print(f"\r  flex={flex:+6.1f}°  abd={abd:5.1f}°  rot={rot:+5.1f}°  elb={elb:5.1f}°", end="")
+        target += interval
+        sleep_s = target - time.perf_counter()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        else:
+            target = time.perf_counter()
+
+
+def run_step(sock: socket.socket, addr: tuple, hz: float) -> None:
+    """
+    Step through a set of reference poses, holding each for 3 seconds.
+    Useful for testing calibration and angle mapping.
+    """
+    poses = [
+        ("Arm down (rest)",     0.0,  0.0,  0.0,   0.0),
+        ("Arm forward 90°",    90.0,  0.0,  0.0,   0.0),
+        ("Arm side 90°",        0.0, 90.0,  0.0,   0.0),
+        ("Elbow bent 90°",      0.0,  0.0,  0.0,  90.0),
+        ("Arm up (overhead)",  90.0, 90.0,  0.0,   0.0),
+        ("Int. rotation",       0.0,  0.0, 45.0,  90.0),
+        ("Ext. rotation",       0.0,  0.0,-45.0,  90.0),
+    ]
+    interval = 1.0 / hz
+    hold_s   = 3.0
+    print("[mock_streamer] Mode: step — press Ctrl+C to stop")
+    while True:
+        for label, flex, abd, rot, elb in poses:
+            print(f"\n  Pose: {label}  →  flex={flex:+5.1f}  abd={abd:5.1f}  rot={rot:+5.1f}  elb={elb:5.1f}")
+            t_end  = time.perf_counter() + hold_s
+            target = time.perf_counter()
+            while time.perf_counter() < t_end:
+                sock.sendto(_fmt(flex, abd, rot, elb), addr)
+                target += interval
+                sleep_s = target - time.perf_counter()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                else:
+                    target = time.perf_counter()
+
+
+def run_static(sock: socket.socket, addr: tuple, hz: float) -> None:
+    """Send zero angles continuously — baseline jitter test."""
+    interval = 1.0 / hz
+    target = time.perf_counter()
+    print("[mock_streamer] Mode: static (all zeros) — press Ctrl+C to stop")
+    while True:
+        sock.sendto(_fmt(0.0, 0.0, 0.0, 0.0), addr)
+        target += interval
+        sleep_s = target - time.perf_counter()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        else:
+            target = time.perf_counter()
+
+
+def run_random_walk(sock: socket.socket, addr: tuple, hz: float) -> None:
+    """Bounded random walk — stress-test filter responsiveness."""
+    interval = 1.0 / hz
+    flex, abd, rot, elb = 0.0, 0.0, 0.0, 0.0
+    limits = [(-90, 90), (0, 90), (-60, 60), (0, 150)]
+    vals   = [flex, abd, rot, elb]
+    target = time.perf_counter()
+    print("[mock_streamer] Mode: random walk — press Ctrl+C to stop")
+    while True:
+        for i, (lo, hi) in enumerate(limits):
+            vals[i] = float(max(lo, min(hi, vals[i] + random.gauss(0, 2.0))))
+        sock.sendto(_fmt(*vals), addr)
+        print(f"\r  flex={vals[0]:+6.1f}°  abd={vals[1]:5.1f}°  rot={vals[2]:+5.1f}°  elb={vals[3]:5.1f}°", end="")
+        target += interval
+        sleep_s = target - time.perf_counter()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        else:
+            target = time.perf_counter()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MonoArm UDP angle data generator.")
+    parser.add_argument("--host",   default="127.0.0.1", help="Destination IP (default: 127.0.0.1)")
+    parser.add_argument("--port",   type=int, default=9000, help="UDP port (default: 9000)")
+    parser.add_argument("--hz",     type=float, default=30.0, help="Send rate in Hz (default: 30)")
+    parser.add_argument("--mode",   choices=["sinusoidal", "step", "static", "random"],
+                        default="sinusoidal", help="Animation mode")
+    args = parser.parse_args()
+
+    addr = (args.host, args.port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    addr = (host, port)
-    dt   = 1.0 / fps
-    t    = 0.0
-
-    print(f"Mock streamer → {host}:{port}  at {fps} fps")
-    print("Press Ctrl+C to stop.\n")
-    print("Animating: shoulder_pitch 20-90°, elbow_flexion 30-140°")
+    print(f"[mock_streamer] Sending to {args.host}:{args.port} at {args.hz:.0f} Hz")
+    print(f"[mock_streamer] Packet format: S,flex,abd,rot,elbow\\n")
 
     try:
-        while True:
-            # ── Base motion (realistic arm raise + elbow bend) ─────────────
-            pitch = 55 + 35 * math.sin(t * 0.8)          # 20°–90°
-            roll  = 10 +  8 * math.sin(t * 0.5 + 1.0)    # 2°–18°
-            yaw   = 15 +  5 * math.sin(t * 0.3 + 0.5)    # 10°–20°
-            elbow = 85 + 55 * math.sin(t * 0.6 + 0.8)    # 30°–140°
-
-            # ── Each framework adds slightly different noise ────────────────
-            mp = [pitch,                roll,                yaw,                elbow              ]
-            mv = [pitch + 2.1*math.sin(t*3.1), roll + 1.5*math.cos(t*2.7),
-                  yaw   + 1.8*math.sin(t*2.3), elbow+ 2.0*math.cos(t*3.5)]
-            fu = [pitch + 0.5*math.sin(t*5.0), roll + 0.4*math.cos(t*4.5),
-                  yaw   + 0.3*math.sin(t*4.2), elbow+ 0.6*math.cos(t*5.3)]
-            gr = [pitch + 0.1*math.sin(t*6.0), roll + 0.1*math.cos(t*5.5),
-                  yaw   + 0.1*math.sin(t*5.2), elbow+ 0.1*math.cos(t*6.3)]
-            unc = 0.5 + 0.3 * math.sin(t * 0.4)           # uncertainty 0.2–0.8
-
-            send(sock, addr, "MP", mp)
-            send(sock, addr, "MV", mv)
-            send(sock, addr, "FU", fu + [unc])
-            send(sock, addr, "GR", gr)
-
-            print(f"\r  t={t:6.1f}s  pitch={pitch:5.1f}°  elbow={elbow:5.1f}°  unc={unc:.2f}", end="")
-            t   += dt
-            time.sleep(dt)
-
+        if args.mode == "sinusoidal":
+            run_sinusoidal(sock, addr, args.hz)
+        elif args.mode == "step":
+            run_step(sock, addr, args.hz)
+        elif args.mode == "static":
+            run_static(sock, addr, args.hz)
+        elif args.mode == "random":
+            run_random_walk(sock, addr, args.hz)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\n[mock_streamer] Stopped.")
     finally:
         sock.close()
 
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=9000)
-    ap.add_argument("--fps",  type=int, default=30)
-    args = ap.parse_args()
-    run(args.host, args.port, args.fps)
+    main()
