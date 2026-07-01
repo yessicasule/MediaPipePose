@@ -33,7 +33,7 @@ from src.evaluation.h36m_loader import (
     H36M_LSHOULDER, H36M_RHIP, H36M_LHIP, H36M_CHEST,
 )
 from src.evaluation.metrics import (
-    compute_joint_metrics, evaluate_framework,
+    compute_joint_metrics, evaluate_framework, print_metrics_table,
     JOINTS, FrameworkMetrics,
 )
 
