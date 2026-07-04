@@ -38,9 +38,9 @@ except ImportError:
 
 _JOINTS = [
     ("elbow_flexion",        "Elbow Flexion",        "#e05c5c"),
-    ("shoulder_elevation",   "Shoulder Elevation",   "#5c9ee0"),
-    ("shoulder_yaw",         "Shoulder Yaw",         "#5ce07a"),
-    ("shoulder_roll",        "Shoulder Roll",        "#e0c05c"),
+    ("shoulder_flexion",     "Shoulder Flexion",     "#5c9ee0"),
+    ("shoulder_rotation",    "Shoulder Rotation",    "#5ce07a"),
+    ("shoulder_abduction",   "Shoulder Abduction",   "#e0c05c"),
 ]
 
 
@@ -58,9 +58,23 @@ def load_csv(csv_path: Path) -> dict:
     detected = np.array([int(r["pose_detected"]) for r in rows])
 
     data = {"elapsed": elapsed, "detected": detected, "n": len(rows)}
+    
+    _FALLBACKS = {
+        "shoulder_flexion": "shoulder_elevation",
+        "shoulder_rotation": "shoulder_yaw",
+        "shoulder_abduction": "shoulder_roll",
+    }
+
     for key, *_ in _JOINTS:
-        data[f"{key}_raw"]  = np.array([float(r[f"{key}_raw"])  for r in rows])
-        data[f"{key}_filt"] = np.array([float(r[f"{key}_filt"]) for r in rows])
+        raw_key = f"{key}_raw"
+        filt_key = f"{key}_filt"
+        if rows and raw_key not in rows[0] and key in _FALLBACKS:
+            fb = _FALLBACKS[key]
+            raw_key = f"{fb}_raw"
+            filt_key = f"{fb}_filt"
+            
+        data[f"{key}_raw"]  = np.array([float(r[raw_key])  for r in rows])
+        data[f"{key}_filt"] = np.array([float(r[filt_key]) for r in rows])
     return data
 
 

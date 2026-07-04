@@ -254,3 +254,80 @@ def metrics_to_dict(results: list[FrameworkMetrics]) -> list[dict]:
             }
         out.append(d)
     return out
+
+
+def compute_jitter(signal: list[float] | np.ndarray) -> float:
+    """Compute jitter (mean absolute frame-to-frame change)."""
+    n = len(signal)
+    if n <= 1:
+        return 0.0
+    return float(np.mean(np.abs(np.diff(signal))))
+
+
+def evaluate_predictions(
+    framework: str,
+    preds: np.ndarray,
+    targets: np.ndarray,
+    joint_names: list[str] | None = None
+) -> FrameworkMetrics:
+    """
+    Evaluate predicted joint angles against ground truth.
+    Flattens sequence dimensions if necessary.
+    """
+    if joint_names is None:
+        joint_names = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
+        
+    # Flatten sequence dimensions if they are 3D
+    if len(preds.shape) == 3:
+        preds = preds.reshape(-1, preds.shape[-1])
+    if len(targets.shape) == 3:
+        targets = targets.reshape(-1, targets.shape[-1])
+        
+    pred_arrays = {joint_names[i]: preds[:, i] for i in range(min(len(joint_names), preds.shape[1]))}
+    gt_arrays = {joint_names[i]: targets[:, i] for i in range(min(len(joint_names), targets.shape[1]))}
+    
+    # Map input names (like pitch/roll/yaw) to the canonical JOINTS list
+    mapping = {
+        "shoulder_pitch": "shoulder_flexion",
+        "shoulder_roll": "shoulder_abduction",
+        "shoulder_yaw": "shoulder_rotation",
+        "elbow_flexion": "elbow_flexion",
+        "shoulder_flexion": "shoulder_flexion",
+        "shoulder_abduction": "shoulder_abduction",
+        "shoulder_rotation": "shoulder_rotation",
+    }
+    
+    mapped_preds = {}
+    mapped_gts = {}
+    for old_name, new_name in mapping.items():
+        if old_name in pred_arrays:
+            mapped_preds[new_name] = pred_arrays[old_name]
+        if old_name in gt_arrays:
+            mapped_gts[new_name] = gt_arrays[old_name]
+            
+    return evaluate_framework(framework, mapped_preds, mapped_gts, joints=JOINTS)
+
+
+def metrics_to_model_dict(fm: FrameworkMetrics) -> dict:
+    """Format FrameworkMetrics to matching dictionary format expected by training scripts."""
+    mapping = {
+        "shoulder_flexion": "shoulder_pitch",
+        "shoulder_abduction": "shoulder_roll",
+        "shoulder_rotation": "shoulder_yaw",
+        "elbow_flexion": "elbow_flexion"
+    }
+    
+    out = {}
+    for j, jm in fm.joints.items():
+        name = mapping.get(j, j)
+        out[name] = {
+            "MAE": jm.mae,
+            "RMSE": jm.rmse,
+            "Jitter": jm.jitter
+        }
+    out["average"] = {
+        "MAE": fm.mpjae,
+        "RMSE": fm.mean_rmse,
+        "Jitter": fm.mean_jitter
+    }
+    return out

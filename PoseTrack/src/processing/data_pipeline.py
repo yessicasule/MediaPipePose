@@ -12,7 +12,6 @@ import cv2
 import numpy as np
 import pandas as pd
 
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from config.config import DATA_DIR, FRAMES_DIR, LANDMARKS_DIR, ANGLES_DIR
 from src.utils.io_utils import extract_frames_from_video
 from src.processing.joint_angle_estimator import Vec3, compute_all

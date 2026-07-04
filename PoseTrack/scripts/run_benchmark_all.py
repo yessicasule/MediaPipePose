@@ -8,8 +8,6 @@ import time
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-
 from config.config import Config
 from src.pose.mediapipe_runner import MediaPipeRunner
 from src.pose.movenet_runner import MoveNetRunner

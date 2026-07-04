@@ -130,7 +130,6 @@ class UnifiedBenchmarkRunner:
         print("Running MediaPipe Benchmark")
         print(f"{'='*60}")
         
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from benchmarks.run_mediapipe_on_frames import run
         
         _complexity_map = {"lite": 0, "full": 1, "heavy": 2}
@@ -160,7 +159,6 @@ class UnifiedBenchmarkRunner:
         print("Running MoveNet Benchmark")
         print(f"{'='*60}")
         
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from benchmarks.run_movenet_on_frames import run
         
         result = run(

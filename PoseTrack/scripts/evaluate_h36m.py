@@ -83,8 +83,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.evaluation.h36m_loader import iter_h36m_dataset, GTAngles, JOINTS as GT_JOINTS
 from src.evaluation.metrics import (
     evaluate_framework, print_metrics_table, metrics_to_dict,

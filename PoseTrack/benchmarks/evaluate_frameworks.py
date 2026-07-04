@@ -4,8 +4,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.processing.joint_angle_estimator import Vec3, elbow_flexion_deg
 from src.evaluation.metrics import compute_jitter, compute_static_pose_stability, compute_fps
 

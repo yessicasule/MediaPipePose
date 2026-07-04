@@ -62,7 +62,7 @@ PoseTrack/benchmarks/results/
 PoseTrack/legacy/
 
 # ── Unity ─────────────────────────────────────────────────────────────────────
-# Generated — never commit these
+# Generated
 [Ll]ibrary/
 [Ll]ogs/
 [Oo]bj/
@@ -75,11 +75,11 @@ PoseTrack/legacy/
 *.suo
 *.unitypackage
 
-# Auto-imported Unity packages — re-downloaded on first open, do not commit
+# Auto-imported Unity packages
 **/Assets/TextMesh Pro/
 **/Assets/TextMesh Pro.meta
 
-# Large binary assets — use Git LFS or keep local
+# Large binary assets 
 *.fbx
 
 # ── OS ────────────────────────────────────────────────────────────────────────

@@ -54,8 +54,6 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 from src.evaluation.h36m_loader import iter_h36m_dataset
 from src.evaluation.metrics import JOINTS, JOINT_LABELS
 

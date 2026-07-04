@@ -165,7 +165,7 @@ python scripts/run_demo.py \
 
 | Filter | Class | Best for |
 |--------|-------|---------|
-| Kalman 1D | `KalmanFilter1D` | Real-time, optimal for noisy angles |
+| Kalman 2-State | `KalmanFilter2State` | Real-time, optimal for noisy angles (angle + velocity) |
 | Exponential MA | `ExponentialMovingAverageFilter` | Low CPU, fast response |
 | Moving Average | `MovingAverageFilter` | Simplest baseline |
 | Savitzky–Golay | `SavitzkyGolayFilter` | Best smoothness, slight lag |
@@ -267,7 +267,7 @@ Key citations:
 | R8 | Koritnik et al. | Two-link kinematic arm model |
 | R9 | Biryukova et al. — J. Biomechanics 2000 | Shoulder angle decomposition |
 | R10 | DergiPark filtering survey | Filter selection rationale |
-| R11 | Van Biezen — Kalman lectures | `KalmanFilter1D` implementation |
+| R11 | Van Biezen — Kalman lectures | `KalmanFilter2State` implementation |
 | R12 | Savitzky–Golay tutorial | `SavitzkyGolayFilter` implementation |
 | R13 | Vaswani et al. — Attention Is All You Need | Transformer encoder in Fusion model |
 | R14 | Ionescu et al. — Human3.6M | Ground-truth training data |

@@ -9,18 +9,21 @@ Loss:
     D_total = BCE(D(gt), 1)     +  BCE(D(G(x).detach()), 0)
 """
 
-import sys, json, argparse
+import sys
+import json
+import argparse
 import numpy as np
 from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from config.config import Config
 from src.models.fusion_network import DeepFusionPoseModel, FusionDataset, mc_predict
-from src.evaluation.metrics import compute_jitter
+from src.models.trainer import GANTrainer
+from src.evaluation.metrics import evaluate_predictions, metrics_to_model_dict
 
 # ────────────────────────────────────────────
 # Discriminator
@@ -56,130 +59,8 @@ class TemporalDiscriminator(nn.Module):
 
 
 # ────────────────────────────────────────────
-# Loss components
+# Evaluation helper
 # ────────────────────────────────────────────
-
-def temporal_smoothness_loss(pred: torch.Tensor) -> torch.Tensor:
-    """Penalises sudden angle accelerations (second derivative)."""
-    first_diff  = pred[:, 1:, :]  - pred[:, :-1, :]
-    second_diff = first_diff[:, 1:, :] - first_diff[:, :-1, :]
-    return second_diff.pow(2).mean()
-
-
-# ────────────────────────────────────────────
-# GAN Training Loop
-# ────────────────────────────────────────────
-
-def train_gan(
-    generator: nn.Module,
-    discriminator: nn.Module,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    pretrain_epochs: int = 20,
-    gan_epochs: int = 60,
-    lr_g: float = 1e-4,
-    lr_d: float = 4e-5,
-    lambda_recon: float = 10.0,
-    lambda_adv:   float = 1.0,
-    lambda_smooth: float = 5.0,
-    device: str = "cpu",
-    checkpoint_path: str = "outputs/models/gan_generator_best.pt",
-) -> dict:
-    Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-
-    generator.to(device)
-    discriminator.to(device)
-
-    opt_g = optim.AdamW(generator.parameters(),     lr=lr_g, betas=(0.5, 0.999))
-    opt_d = optim.AdamW(discriminator.parameters(), lr=lr_d, betas=(0.5, 0.999))
-
-    mse  = nn.MSELoss()
-    bce  = nn.BCELoss()
-
-    history = {"pretrain_loss": [], "g_loss": [], "d_loss": [], "val_mse": []}
-
-    # ── Phase A: Pretrain generator alone (stabilise before adversarial) ──
-    print(f"Pre-training generator for {pretrain_epochs} epochs...")
-    for epoch in range(1, pretrain_epochs + 1):
-        generator.train()
-        ep_loss = 0.0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            opt_g.zero_grad()
-            pred = generator(xb)
-            loss = mse(pred, yb) + lambda_smooth * temporal_smoothness_loss(pred)
-            loss.backward()
-            nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
-            opt_g.step()
-            ep_loss += loss.item() * xb.size(0)
-        ep_loss /= len(train_loader.dataset)
-        history["pretrain_loss"].append(ep_loss)
-        if epoch % 5 == 0 or epoch == 1:
-            print(f"  Pretrain epoch {epoch:3d}/{pretrain_epochs} | loss={ep_loss:.4f}")
-
-    # ── Phase B: Adversarial training ────────────────────────────────────
-    print(f"\nAdversarial training for {gan_epochs} epochs...")
-    best_val = float("inf")
-    for epoch in range(1, gan_epochs + 1):
-        generator.train()
-        discriminator.train()
-        g_ep, d_ep = 0.0, 0.0
-
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            real_label = torch.ones(xb.size(0), 1, device=device)
-            fake_label = torch.zeros(xb.size(0), 1, device=device)
-
-            # ── Update Discriminator ──
-            opt_d.zero_grad()
-            fake_seq    = generator(xb).detach()
-            d_real_loss = bce(discriminator(yb),        real_label)
-            d_fake_loss = bce(discriminator(fake_seq),  fake_label)
-            d_loss = (d_real_loss + d_fake_loss) * 0.5
-            d_loss.backward()
-            opt_d.step()
-
-            # ── Update Generator ──
-            opt_g.zero_grad()
-            fake_seq    = generator(xb)
-            adv_loss    = bce(discriminator(fake_seq),  real_label)
-            recon_loss  = mse(fake_seq, yb)
-            smooth_loss = temporal_smoothness_loss(fake_seq)
-            g_loss = lambda_recon * recon_loss + lambda_adv * adv_loss + lambda_smooth * smooth_loss
-            g_loss.backward()
-            nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
-            opt_g.step()
-
-            g_ep += g_loss.item() * xb.size(0)
-            d_ep += d_loss.item() * xb.size(0)
-
-        g_ep /= len(train_loader.dataset)
-        d_ep /= len(train_loader.dataset)
-
-        # Validation MSE only
-        generator.eval()
-        val_mse = 0.0
-        with torch.no_grad():
-            for xb, yb in val_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                pred = generator(xb)
-                val_mse += mse(pred, yb).item() * xb.size(0)
-        val_mse /= len(val_loader.dataset)
-
-        history["g_loss"].append(g_ep)
-        history["d_loss"].append(d_ep)
-        history["val_mse"].append(val_mse)
-
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"  GAN epoch {epoch:3d}/{gan_epochs} | G={g_ep:.4f} | D={d_ep:.4f} | val_mse={val_mse:.4f}")
-
-        if val_mse < best_val:
-            best_val = val_mse
-            torch.save(generator.state_dict(), checkpoint_path)
-
-    print(f"Best GAN val MSE: {best_val:.4f} → {checkpoint_path}")
-    return history
-
 
 def evaluate_gan(generator: nn.Module, loader: DataLoader, device: str = "cpu") -> dict:
     generator.eval()
@@ -190,21 +71,11 @@ def evaluate_gan(generator: nn.Module, loader: DataLoader, device: str = "cpu") 
             all_preds.append(generator(xb).cpu().numpy())
             all_targets.append(yb.numpy())
 
-    preds   = np.concatenate(all_preds,   axis=0).reshape(-1, 4)
-    targets = np.concatenate(all_targets, axis=0).reshape(-1, 4)
+    preds   = np.concatenate(all_preds,   axis=0) # [N, L, 4]
+    targets = np.concatenate(all_targets, axis=0) # [N, L, 4]
 
-    mae  = np.mean(np.abs(preds - targets), axis=0)
-    rmse = np.sqrt(np.mean((preds - targets) ** 2, axis=0))
-    jitter = np.array([compute_jitter(preds[:, j].tolist()) for j in range(4)])
-
-    joint_names = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow_flexion"]
-    metrics = {}
-    for i, name in enumerate(joint_names):
-        metrics[name] = {"MAE": float(mae[i]), "RMSE": float(rmse[i]), "Jitter": float(jitter[i])}
-    metrics["average"] = {
-        "MAE": float(mae.mean()), "RMSE": float(rmse.mean()), "Jitter": float(jitter.mean())
-    }
-    return metrics
+    fm = evaluate_predictions("GANRefinery", preds, targets, joint_names=['shoulder_pitch', 'shoulder_roll', 'shoulder_yaw', 'elbow_flexion'])
+    return metrics_to_model_dict(fm)
 
 
 # ────────────────────────────────────────────
@@ -223,6 +94,7 @@ def main():
     ap.add_argument("--gan_epochs",  type=int,   default=60)
     args = ap.parse_args()
 
+    Config.ensure_directories()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
@@ -245,13 +117,33 @@ def main():
     output_dir = Path(args.output_dir)
     ckpt = str(output_dir / "gan_generator_best.pt")
 
-    train_gan(
-        generator, discriminator,
-        train_loader, val_loader,
-        pretrain_epochs=args.pretrain,
-        gan_epochs=args.gan_epochs,
+    trainer = GANTrainer(
+        generator=generator,
+        discriminator=discriminator,
         device=device,
         checkpoint_path=ckpt,
+        patience=15,
+        clip_grad=1.0,
+        lambda_recon=10.0,
+        lambda_adv=1.0,
+        lambda_smooth=5.0
+    )
+
+    opt_g = optim.AdamW(generator.parameters(),     lr=1e-4, betas=(0.5, 0.999))
+    opt_d = optim.AdamW(discriminator.parameters(), lr=4e-5, betas=(0.5, 0.999))
+    
+    mse_criterion = nn.MSELoss()
+    bce_criterion = nn.BCELoss()
+
+    trainer.fit_gan(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        pretrain_epochs=args.pretrain,
+        gan_epochs=args.gan_epochs,
+        opt_g=opt_g,
+        opt_d=opt_d,
+        mse_criterion=mse_criterion,
+        bce_criterion=bce_criterion
     )
 
     generator.load_state_dict(torch.load(ckpt, map_location=device))

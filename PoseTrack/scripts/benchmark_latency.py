@@ -31,9 +31,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.pose.mediapipe_runner import MediaPipeRunner
 from src.processing.angle_solver import compute_arm_angles
 from src.processing.angle_filter import AngleFilterBank

@@ -45,9 +45,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.evaluation.h36m_loader import parse_h36m_file, GTAngles
 
 # ── Synthetic noise profiles (per-joint, right arm) ──────────────────────────

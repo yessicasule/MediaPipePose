@@ -3,8 +3,6 @@ import sys
 from pathlib import Path
 import cv2
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-
 from src.pose.mediapipe_runner import MediaPipeRunner
 from src.processing.joint_angle_estimator import compute_all
 

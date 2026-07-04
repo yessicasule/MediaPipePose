@@ -21,14 +21,15 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
-from src.evaluation.metrics import compute_jitter
+from config.config import Config
+from src.models.datasets import BaseSequenceDataset
+from src.models.trainer import BaseTrainer
+from src.evaluation.metrics import evaluate_predictions, metrics_to_model_dict
 
 # ─────────────────────────────────────────────
 # 1.  Dataset
@@ -44,7 +45,7 @@ TARGET_COLS = [
 ]
 
 
-class FusionDataset(Dataset):
+class FusionDataset(BaseSequenceDataset):
     """
     Loads the unified 17-column CSV and creates sliding-window sequences.
     input_dim=12, output_dim=4.
@@ -58,45 +59,15 @@ class FusionDataset(Dataset):
         step_size: int = 5,
         scaler_stats: dict = None,   # pass None to fit; pass dict to apply
     ):
-        df = pd.read_csv(csv_path)
-
-        raw_inputs  = df[INPUT_COLS].values.astype(np.float32)
-        raw_targets = df[TARGET_COLS].values.astype(np.float32)
-
-        # --- normalise inputs ---
-        if scaler_stats is None:
-            self.col_min = raw_inputs.min(axis=0)
-            self.col_max = raw_inputs.max(axis=0)
-        else:
-            self.col_min = np.array(scaler_stats["col_min"], dtype=np.float32)
-            self.col_max = np.array(scaler_stats["col_max"], dtype=np.float32)
-
-        rng = self.col_max - self.col_min
-        rng[rng == 0] = 1.0  # avoid div-by-zero
-        norm_inputs = 2.0 * (raw_inputs - self.col_min) / rng - 1.0
-
-        # --- sliding window ---
-        self.samples = []
-        n = len(df)
-        for start in range(0, n - sequence_length + 1, step_size):
-            end = start + sequence_length
-            self.samples.append((
-                norm_inputs[start:end],
-                raw_targets[start:end],
-            ))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        x, y = self.samples[idx]
-        return torch.tensor(x), torch.tensor(y)
-
-    def scaler_dict(self) -> dict:
-        return {
-            "col_min": self.col_min.tolist(),
-            "col_max": self.col_max.tolist(),
-        }
+        super().__init__(
+            csv_path=csv_path,
+            feature_cols=INPUT_COLS,
+            target_cols=TARGET_COLS,
+            sequence_length=sequence_length,
+            step_size=step_size,
+            scaler_stats=scaler_stats,
+            normalize=True
+        )
 
 
 # ─────────────────────────────────────────────
@@ -272,77 +243,8 @@ def confidence_from_std(std: torch.Tensor) -> torch.Tensor:
 
 
 # ─────────────────────────────────────────────
-# 7.  Training helpers
+# 7.  Evaluation helper
 # ─────────────────────────────────────────────
-
-def train_fusion_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    epochs: int = 80,
-    lr: float = 1e-4,
-    weight_decay: float = 1e-5,
-    patience: int = 15,
-    device: str = "cpu",
-    checkpoint_path: str = "outputs/models/fusion_best.pt",
-) -> dict:
-    Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-    model.to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-
-    history = {"train_loss": [], "val_loss": []}
-    best_val = float("inf")
-    patience_counter = 0
-
-    print(f"Training DeepFusionPose on {device} for up to {epochs} epochs…")
-    for epoch in range(1, epochs + 1):
-        # — train —
-        model.train()
-        train_loss = 0.0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            pred = model(xb)
-            loss = criterion(pred, yb)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            train_loss += loss.item() * xb.size(0)
-        train_loss /= len(train_loader.dataset)
-
-        # — validate —
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for xb, yb in val_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                pred = model(xb)
-                val_loss += criterion(pred, yb).item() * xb.size(0)
-        val_loss /= len(val_loader.dataset)
-
-        scheduler.step()
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"  Epoch {epoch:3d}/{epochs} | train={train_loss:.4f} | val={val_loss:.4f}")
-
-        # — early stopping + checkpoint —
-        if val_loss < best_val:
-            best_val = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), checkpoint_path)
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"  Early stop at epoch {epoch}.")
-                break
-
-    print(f"  Best val loss: {best_val:.4f} → saved to {checkpoint_path}")
-    return history
-
 
 def evaluate_fusion_model(model: nn.Module, loader: DataLoader, device: str = "cpu",
                            n_mc: int = 50) -> dict:
@@ -355,32 +257,22 @@ def evaluate_fusion_model(model: nn.Module, loader: DataLoader, device: str = "c
         all_stds.append(std.cpu().numpy())
         all_targets.append(yb.numpy())
 
-    means   = np.concatenate(all_means, axis=0).reshape(-1, 4)
-    stds    = np.concatenate(all_stds, axis=0).reshape(-1, 4)
-    targets = np.concatenate(all_targets, axis=0).reshape(-1, 4)
+    means   = np.concatenate(all_means, axis=0) # [N, L, 4]
+    stds    = np.concatenate(all_stds, axis=0)  # [N, L, 4]
+    targets = np.concatenate(all_targets, axis=0) # [N, L, 4]
 
-    mae  = np.mean(np.abs(means - targets), axis=0)
-    rmse = np.sqrt(np.mean((means - targets) ** 2, axis=0))
+    fm = evaluate_predictions("FusionModel", means, targets, joint_names=['shoulder_pitch', 'shoulder_roll', 'shoulder_yaw', 'elbow_flexion'])
+    metrics = metrics_to_model_dict(fm)
 
-    # Jitter over all concatenated predictions
-    jitter = np.array([compute_jitter(means[:, j].tolist()) for j in range(4)])
-    mean_uncertainty = np.mean(stds, axis=0)
-
+    # Add Uncertainty
+    stds_flat = stds.reshape(-1, 4)
+    mean_uncertainty = np.mean(stds_flat, axis=0)
+    
     joint_names = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow_flexion"]
-    metrics = {}
     for i, name in enumerate(joint_names):
-        metrics[name] = {
-            "MAE":         float(mae[i]),
-            "RMSE":        float(rmse[i]),
-            "Jitter":      float(jitter[i]),
-            "Uncertainty": float(mean_uncertainty[i]),
-        }
-    metrics["average"] = {
-        "MAE":         float(np.mean(mae)),
-        "RMSE":        float(np.mean(rmse)),
-        "Jitter":      float(np.mean(jitter)),
-        "Uncertainty": float(np.mean(mean_uncertainty)),
-    }
+        metrics[name]["Uncertainty"] = float(mean_uncertainty[i])
+    metrics["average"]["Uncertainty"] = float(np.mean(mean_uncertainty))
+    
     return metrics
 
 
@@ -400,6 +292,8 @@ def main():
     ap.add_argument("--n_mc",       type=int, default=50, help="MC Dropout samples at inference")
     args = ap.parse_args()
 
+    # Load custom config if specified
+    Config.ensure_directories()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -424,16 +318,33 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=0)
 
     # ── Model ────────────────────────────────────────
-    model = DeepFusionPoseModel()
+    model = DeepFusionPoseModel(dropout=0.2)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {total_params:,}")
 
     # ── Train ────────────────────────────────────────
     ckpt = str(output_dir / "fusion_best.pt")
-    history = train_fusion_model(
-        model, train_loader, val_loader,
-        epochs=args.epochs, lr=args.lr, device=device,
+    
+    trainer = BaseTrainer(
+        model=model,
+        device=device,
         checkpoint_path=ckpt,
+        patience=15,
+        clip_grad=1.0
+    )
+    
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    criterion = nn.MSELoss()
+
+    print(f"Beginning DeepFusionPose training using BaseTrainer...")
+    _ = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=args.epochs,
+        optimizer=optimizer,
+        criterion=criterion,
+        scheduler=scheduler
     )
 
     # ── Evaluate (load best) ─────────────────────────

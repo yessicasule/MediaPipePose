@@ -24,9 +24,6 @@ from pathlib import Path
 
 import numpy as np
 
-# Ensure project root on path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.pose.base import Landmark, N_LANDMARKS, _default_landmarks
 from src.processing.coordinate_frame import build_torso_frame, TorsoFrame
 from src.processing.angle_solver import compute_arm_angles, ArmAngles

@@ -54,9 +54,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-# Ensure project root on path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.pose import load_estimator
 from src.processing.angle_solver import compute_arm_angles, ArmAngles
 from src.processing.angle_filter import AngleFilterBank

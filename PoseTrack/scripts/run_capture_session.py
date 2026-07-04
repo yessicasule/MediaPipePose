@@ -30,8 +30,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-
 from config.config import Config
 from src.pose.mediapipe_runner import MediaPipeRunner
 from src.processing.angle_filter import AngleFilterSystem

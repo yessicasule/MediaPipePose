@@ -31,10 +31,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Ensure src is on the path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.pose.mediapipe_runner import MediaPipeRunner
+from src.pose import load_estimator, PoseEstimator
 from src.processing.coordinate_frame import build_torso_frame
 from src.processing.angle_solver import compute_arm_angles
 from src.processing.angle_filter import AngleFilterBank
@@ -120,7 +117,7 @@ def _draw_overlay(
 
 def _run_calibration_session(
     cap: cv2.VideoCapture,
-    runner: MediaPipeRunner,
+    runner: PoseEstimator,
     mgr: CalibrationManager,
     save_path: Path,
 ) -> bool:
@@ -232,11 +229,15 @@ def main() -> None:
     parser.add_argument("--calib",    default="calibration.json",
                         help="Path to calibration file (auto-loaded if exists)")
     parser.add_argument("--no-udp",   action="store_true", help="Disable UDP transmission")
+    parser.add_argument("--framework", choices=["mediapipe", "movenet_lightning", "movenet_thunder", "posenet"], default="mediapipe")
     parser.add_argument("--log-dir",  default="outputs/logs")
     args = parser.parse_args()
 
+    from config.config import Config
+    Config.ensure_directories()
+
     # --- Setup ---
-    runner   = MediaPipeRunner()
+    runner   = load_estimator(args.framework)
     filt     = AngleFilterBank(filter_type=args.filter, stream_hz=args.hz)
     calib_mgr = CalibrationManager()
     logger   = CsvAngleLogger(output_dir=args.log_dir, filter_type=args.filter)
