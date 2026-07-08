@@ -148,7 +148,7 @@ def main() -> None:
     print(f"{'Filter Configuration':<28} | {'Static Std (°)':<15} | {'Noise Red. (%)':<15} | {'Step Lag (ms)':<14} | {'RMSE (°)':<10}")
     print("-" * 92)
     for r in results:
-        target_check = "✅ PASS" if r["static_std"] <= 3.0 else "⚠️ FAIL"
+        target_check = "PASS" if r["static_std"] <= 3.0 else "FAIL"
         print(f"{r['name']:<28} | {r['static_std']:>7.2f}° ({target_check}) | {r['noise_reduct']:>12.1f}% | {r['step_lag_ms']:>10.1f} ms | {r['rmse']:>8.2f}°")
     print("-" * 92)
     print("Month-4 Spec Requirement: Static Std <= 3.0° on static poses.\n")

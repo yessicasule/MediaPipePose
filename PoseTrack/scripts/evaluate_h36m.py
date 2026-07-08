@@ -83,7 +83,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.evaluation.h36m_loader import iter_h36m_dataset, GTAngles, JOINTS as GT_JOINTS
+from src.evaluation.h36m_loader import iter_h36m_dataset, GTAngles
 from src.evaluation.metrics import (
     evaluate_framework, print_metrics_table, metrics_to_dict,
     JOINTS, FrameworkMetrics,
@@ -307,7 +307,7 @@ def csv_predictions(
         pn_shoulder_flexion, ...
     """
     df = pd.read_csv(csv_path)
-    print(f"[✓] CSV loaded: {len(df):,} rows, columns: {list(df.columns)}")
+    print(f"[OK] CSV loaded: {len(df):,} rows, columns: {list(df.columns)}")
 
     # Map CSV prefixes to display names
     PREFIX_MAP = {
@@ -483,14 +483,14 @@ def main() -> None:
     else:   # synthetic (default)
         gt_arrays = load_gt_arrays(Path(args.h36m_dir), args.subjects, args.max_frames)
         if not any(len(v) > 0 for v in gt_arrays.values()):
-            print("[✗] No GT data loaded. Check that h36m_dir exists and contains .txt files.")
+            print("[X] No GT data loaded. Check that h36m_dir exists and contains .txt files.")
             print(f"    Expected path: {Path(args.h36m_dir).resolve()}")
             print("    Example structure: data/dataset/h3.6m/dataset/S9/Directions 1.txt")
             sys.exit(1)
         pred_data = synthetic_predictions(gt_arrays, args.frameworks, rng)
 
     n_frames = len(next(iter(gt_arrays.values())))
-    print(f"[✓] {n_frames:,} frames ready for evaluation\n")
+    print(f"[OK] {n_frames:,} frames ready for evaluation\n")
 
     # ── Compute metrics ───────────────────────────────────────────────────────
     all_results: list[FrameworkMetrics] = []

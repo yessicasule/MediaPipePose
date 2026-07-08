@@ -185,7 +185,7 @@ def print_metrics_table(all_results: list[FrameworkMetrics]) -> None:
     """Print a formatted comparison table to stdout."""
     names = [r.framework for r in all_results]
     col_w = max(16, max(len(n) for n in names) + 2)
-    sep   = "─" * (28 + col_w * len(names))
+    sep   = "-" * (28 + col_w * len(names))
 
     def row(label, vals):
         print(f"  {label:<26}", end="")
@@ -193,17 +193,17 @@ def print_metrics_table(all_results: list[FrameworkMetrics]) -> None:
             print(f"{str(v):>{col_w}}", end="")
         print()
 
-    print("\n" + "═" * (28 + col_w * len(names)))
+    print("\n" + "=" * (28 + col_w * len(names)))
     print("  VALIDATION AGAINST H3.6M GROUND TRUTH")
-    print("═" * (28 + col_w * len(names)))
+    print("=" * (28 + col_w * len(names)))
     row("Framework",       names)
     row(sep[:26],          [sep[:col_w]] * len(names))
     row("N frames",        [str(r.n_frames)                  for r in all_results])
-    row("MPJAE (°) ↓",    [f"{r.mpjae:.2f}"                 for r in all_results])
-    row("Mean RMSE (°) ↓", [f"{r.mean_rmse:.2f}"            for r in all_results])
-    row("Pearson r ↑",     [f"{r.mean_r:.3f}"               for r in all_results])
-    row("PCK@5° ↑",        [f"{r.mean_pck_5:.1f}%"          for r in all_results])
-    row("Jitter (°/fr) ↓", [f"{r.mean_jitter:.2f}"          for r in all_results])
+    row("MPJAE (deg) v",   [f"{r.mpjae:.2f}"                 for r in all_results])
+    row("Mean RMSE (deg) v", [f"{r.mean_rmse:.2f}"            for r in all_results])
+    row("Pearson r ^",     [f"{r.mean_r:.3f}"               for r in all_results])
+    row("PCK@5deg ^",      [f"{r.mean_pck_5:.1f}%"          for r in all_results])
+    row("Jitter (deg/fr) v", [f"{r.mean_jitter:.2f}"          for r in all_results])
     row(sep[:26],          [sep[:col_w]] * len(names))
 
     # Per-joint breakdown
@@ -213,17 +213,17 @@ def print_metrics_table(all_results: list[FrameworkMetrics]) -> None:
             [f"{r.joints[j].mae:.2f}°" if j in r.joints else "N/A"
              for r in all_results])
 
-    print("═" * (28 + col_w * len(names)))
+    print("=" * (28 + col_w * len(names)))
 
     # Winner summary
     valid = [r for r in all_results if not np.isnan(r.mpjae)]
     if len(valid) >= 2:
         best = min(valid, key=lambda r: r.mpjae)
-        print(f"\n  🏆 Best overall MPJAE: {best.framework}  ({best.mpjae:.2f}°)")
+        print(f"\n  * Best overall MPJAE: {best.framework}  ({best.mpjae:.2f} deg)")
         best_r = max(valid, key=lambda r: r.mean_r)
-        print(f"  🏆 Best correlation:   {best_r.framework}  (r={best_r.mean_r:.3f})")
+        print(f"  * Best correlation:   {best_r.framework}  (r={best_r.mean_r:.3f})")
         best_pck = max(valid, key=lambda r: r.mean_pck_5)
-        print(f"  🏆 Best PCK@5°:        {best_pck.framework}  ({best_pck.mean_pck_5:.1f}%)\n")
+        print(f"  * Best PCK@5deg:      {best_pck.framework}  ({best_pck.mean_pck_5:.1f}%)\n")
 
 
 def metrics_to_dict(results: list[FrameworkMetrics]) -> list[dict]:

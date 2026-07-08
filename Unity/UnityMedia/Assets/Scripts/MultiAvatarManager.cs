@@ -22,7 +22,7 @@ namespace MonoArm
 
         [Header("Status")]
         [Tooltip("Log angle values to the console every N seconds (0 = disabled).")]
-        public float logIntervalSeconds = 5f;
+        public float logIntervalSeconds = 0f;
 
         float _logTimer;
 
@@ -48,19 +48,6 @@ namespace MonoArm
 
             // Forward angles from receiver to avatar controller
             avatarController.ApplyAngles(receiver.LatestAngles);
-
-            // Periodic console log
-            if (logIntervalSeconds > 0f)
-            {
-                _logTimer += Time.deltaTime;
-                if (_logTimer >= logIntervalSeconds)
-                {
-                    _logTimer = 0f;
-                    Debug.Log($"[MonoArmManager] pkts={receiver.PacketCount}  " +
-                              $"lag={receiver.TimeSinceLastPacket * 1000f:F0}ms  " +
-                              receiver.LatestAngles.ToString());
-                }
-            }
         }
     }
 }

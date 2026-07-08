@@ -32,26 +32,26 @@ import numpy as np
 
 from config.config import Config
 from src.pose.mediapipe_runner import MediaPipeRunner
-from src.processing.angle_filter import AngleFilterSystem
+from src.processing.angle_filter import AngleFilterBank
+from src.processing.angle_solver import compute_arm_angles, ArmAngles
 from src.processing.calibration import CalibrationManager
-from src.processing.joint_angle_estimator import compute_all
-from src.streaming.udp_streamer import UdpAngleStreamer
+from src.streaming.udp_streamer import UdpAngleSender
 
-CALIB_SEQUENCE = ["arm_down", "arm_forward", "elbow_flexed"]
+CALIB_SEQUENCE = ["arm_down", "arm_forward", "arm_side", "elbow_bent"]
 
-_JOINT_KEYS = ["shoulder_elevation", "shoulder_yaw", "shoulder_roll", "elbow_flexion"]
+_JOINT_KEYS = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
 
 _PLOT_COLOURS = {
-    "elbow_flexion":      (92,  92,  224),   # BGR
-    "shoulder_elevation": (224, 158,  92),
-    "shoulder_yaw":       (92,  224, 122),
-    "shoulder_roll":      (92,  192, 224),
+    "elbow_flexion":       (92,  92,  224),   # BGR
+    "shoulder_flexion":    (224, 158,  92),
+    "shoulder_rotation":   (92,  224, 122),
+    "shoulder_abduction":  (92,  192, 224),
 }
 _PLOT_LABELS = {
     "elbow_flexion":      "Elbow Flex",
-    "shoulder_elevation": "Shldr Elev",
-    "shoulder_yaw":       "Shldr Yaw",
-    "shoulder_roll":      "Shldr Roll",
+    "shoulder_flexion":   "Shldr Flex",
+    "shoulder_rotation":  "Shldr Rot",
+    "shoulder_abduction": "Shldr Abd",
 }
 
 
@@ -162,10 +162,10 @@ def _draw_overlay(frame, angles_raw, angles_filt, fps_actual, recording, calib_s
 
     lines = [
         f"FPS: {fps_actual:.1f}  {'REC' if recording else 'PAUSED'}",
-        f"Elbow flex:  raw {angles_raw.get('elbow_flexion', 0):6.1f}  filt {angles_filt.get('elbow_flexion', 0):6.1f}",
-        f"Shoulder el: raw {angles_raw.get('shoulder_elevation', 0):6.1f}  filt {angles_filt.get('shoulder_elevation', 0):6.1f}",
-        f"Shoulder yaw:raw {angles_raw.get('shoulder_yaw', 0):6.1f}  filt {angles_filt.get('shoulder_yaw', 0):6.1f}",
-        f"Shoulder rol:raw {angles_raw.get('shoulder_roll', 0):6.1f}  filt {angles_filt.get('shoulder_roll', 0):6.1f}",
+        f"Flex:  raw {angles_raw.shoulder_flexion:6.1f}  filt {angles_filt.shoulder_flexion:6.1f}",
+        f"Abd:   raw {angles_raw.shoulder_abduction:6.1f}  filt {angles_filt.shoulder_abduction:6.1f}",
+        f"Rot:   raw {angles_raw.shoulder_rotation:6.1f}  filt {angles_filt.shoulder_rotation:6.1f}",
+        f"Elbow: raw {angles_raw.elbow_flexion:6.1f}  filt {angles_filt.elbow_flexion:6.1f}",
     ]
     if calib_state:
         lines.append(f"CALIB: Hold '{calib_state}' then press SPACE")
@@ -181,8 +181,8 @@ def _open_angle_csv(session_dir: Path) -> tuple:
     writer = csv.writer(f)
     writer.writerow([
         "frame_index", "timestamp_unix", "elapsed_s", "inference_ms", "pose_detected",
-        "elbow_flexion_raw", "shoulder_elevation_raw", "shoulder_yaw_raw", "shoulder_roll_raw",
-        "elbow_flexion_filt", "shoulder_elevation_filt", "shoulder_yaw_filt", "shoulder_roll_filt",
+        "shoulder_flexion_raw", "shoulder_abduction_raw", "shoulder_rotation_raw", "elbow_flexion_raw",
+        "shoulder_flexion_filt", "shoulder_abduction_filt", "shoulder_rotation_filt", "elbow_flexion_filt",
     ])
     return f, writer, path
 
@@ -248,7 +248,7 @@ def main():
         min_detection_confidence=Config.MIN_DETECTION_CONFIDENCE,
         min_tracking_confidence=Config.MIN_TRACKING_CONFIDENCE,
     )
-    filter_sys = AngleFilterSystem(filter_type=args.filter)
+    filter_sys = AngleFilterBank(filter_type=args.filter, stream_hz=Config.STREAM_HZ)
     calib_mgr = CalibrationManager()
     if args.calib:
         calib_path = Path(args.calib)
@@ -259,7 +259,7 @@ def main():
     # UDP stream (optional)
     streamer = None
     if not args.no_stream:
-        streamer = UdpAngleStreamer(host=args.host, port=args.port, hz=Config.OUTPUT_VIDEO_FPS)
+        streamer = UdpAngleSender(host=args.host, port=args.port, hz=Config.STREAM_HZ)
         streamer.start()
         print(f"Streaming to Unity at {args.host}:{args.port}")
 
@@ -310,13 +310,18 @@ def main():
             inference_ms = (time.perf_counter() - t_infer) * 1000.0
 
             pose_detected = landmarks is not None
+            raw_arm: ArmAngles | None = None
+            filt_arm: ArmAngles | None = None
+
             if pose_detected:
-                raw_angles = compute_all(landmarks)
-                calibrated = calib_mgr.apply(raw_angles)
-                filtered_angles = filter_sys.update(calibrated)
-            else:
-                raw_angles = ZERO_ANGLES.copy()
-                filtered_angles = ZERO_ANGLES.copy()
+                raw_arm = compute_arm_angles(landmarks)
+                if raw_arm is not None:
+                    cal_arm = calib_mgr.apply(raw_arm)
+                    filt_arm = filter_sys.update(cal_arm)
+
+            _zero = ArmAngles(0.0, 0.0, 0.0, 0.0)
+            raw_angles = raw_arm or _zero
+            filtered_angles = filt_arm or _zero
 
             # --- Record frame (when recording) ---
             if recording:
@@ -328,15 +333,15 @@ def main():
                 f"{t_unix:.4f}",
                 f"{elapsed:.4f}",
                 f"{inference_ms:.2f}",
-                int(pose_detected),
-                f"{raw_angles['elbow_flexion']:.3f}",
-                f"{raw_angles['shoulder_elevation']:.3f}",
-                f"{raw_angles['shoulder_yaw']:.3f}",
-                f"{raw_angles['shoulder_roll']:.3f}",
-                f"{filtered_angles['elbow_flexion']:.3f}",
-                f"{filtered_angles['shoulder_elevation']:.3f}",
-                f"{filtered_angles['shoulder_yaw']:.3f}",
-                f"{filtered_angles['shoulder_roll']:.3f}",
+                int(pose_detected and raw_arm is not None),
+                f"{raw_angles.shoulder_flexion:.3f}",
+                f"{raw_angles.shoulder_abduction:.3f}",
+                f"{raw_angles.shoulder_rotation:.3f}",
+                f"{raw_angles.elbow_flexion:.3f}",
+                f"{filtered_angles.shoulder_flexion:.3f}",
+                f"{filtered_angles.shoulder_abduction:.3f}",
+                f"{filtered_angles.shoulder_rotation:.3f}",
+                f"{filtered_angles.elbow_flexion:.3f}",
             ])
 
             # --- Log landmarks (optional) ---
@@ -347,13 +352,8 @@ def main():
                 lm_writer.writerow(row)
 
             # --- Stream to Unity ---
-            if streamer and pose_detected:
-                streamer.update_angles(
-                    shoulder_pitch=filtered_angles["shoulder_elevation"],
-                    shoulder_yaw=filtered_angles["shoulder_yaw"],
-                    shoulder_roll=filtered_angles["shoulder_roll"],
-                    elbow_flex=filtered_angles["elbow_flexion"],
-                )
+            if streamer and filt_arm is not None:
+                streamer.update(filt_arm)
 
             # --- FPS calculation ---
             fps_window.append(time.perf_counter())
