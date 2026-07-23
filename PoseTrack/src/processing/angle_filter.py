@@ -62,7 +62,7 @@ try:
 except ImportError:
     _SCIPY_OK = False
 
-from .angle_solver import ArmAngles
+from .angle_solver import ArmAngles, BilateralArmAngles
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +333,61 @@ class AngleFilterBank:
             shoulder_rotation  = self._filters["rotation"].update(angles.shoulder_rotation),
             elbow_flexion      = self._filters["elbow"].update(angles.elbow_flexion),
             rotation_reliable  = angles.rotation_reliable,
+            side               = angles.side,
         )
 
     def reset(self) -> None:
         """Reset all filters (e.g., after a tracking loss)."""
         for f in self._filters.values():
             f.reset()
+
+
+class BilateralFilterBank:
+    """
+    Filter bank for bilateral (left + right) arm tracking.
+
+    Wraps two independent AngleFilterBank instances — one per side — so
+    each of the eight DOF channels has its own filter state.
+
+    A side whose angles are None for a frame (arm occluded) keeps its
+    filter state frozen and returns None for that side; filtering resumes
+    from the previous state when the arm reappears.
+
+    Parameters
+    ----------
+    filter_type : str
+        One of "kalman" (default), "ma", "sg".  Applied to both sides.
+    stream_hz : float
+        Expected update rate in Hz.
+    **kwargs
+        Forwarded to the per-side AngleFilterBank constructors.
+    """
+
+    def __init__(
+        self,
+        filter_type: str = "kalman",
+        stream_hz:   float = 30.0,
+        **kwargs,
+    ) -> None:
+        self.filter_type = filter_type
+        self._banks = {
+            "right": AngleFilterBank(filter_type, stream_hz, **kwargs),
+            "left":  AngleFilterBank(filter_type, stream_hz, **kwargs),
+        }
+
+    def update(self, bilateral: BilateralArmAngles) -> BilateralArmAngles:
+        """Filter both sides and return a new BilateralArmAngles."""
+        return BilateralArmAngles(
+            right=self._banks["right"].update(bilateral.right)
+                  if bilateral.right is not None else None,
+            left =self._banks["left"].update(bilateral.left)
+                  if bilateral.left is not None else None,
+        )
+
+    def reset(self, side: str | None = None) -> None:
+        """Reset one side's filters, or both when side is None."""
+        if side is None:
+            for bank in self._banks.values():
+                bank.reset()
+        else:
+            self._banks[side].reset()

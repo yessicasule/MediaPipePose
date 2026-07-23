@@ -28,6 +28,10 @@ import sys
 import time
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import cv2
 import numpy as np
 

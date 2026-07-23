@@ -90,12 +90,20 @@ from dataclasses import dataclass
 from .coordinate_frame import TorsoFrame, build_torso_frame, world_to_torso, _to_array, _normalize
 
 # ---------------------------------------------------------------------------
-# MediaPipe landmark indices — RIGHT arm
+# MediaPipe landmark indices — both arms
 # ---------------------------------------------------------------------------
 LM_RIGHT_SHOULDER = 12
 LM_RIGHT_ELBOW    = 14
 LM_RIGHT_WRIST    = 16
 LM_LEFT_SHOULDER  = 11
+LM_LEFT_ELBOW     = 13
+LM_LEFT_WRIST     = 15
+
+# (shoulder, elbow, wrist) landmark indices per side
+_SIDE_LANDMARKS = {
+    "right": (LM_RIGHT_SHOULDER, LM_RIGHT_ELBOW, LM_RIGHT_WRIST),
+    "left":  (LM_LEFT_SHOULDER,  LM_LEFT_ELBOW,  LM_LEFT_WRIST),
+}
 
 # Minimum elbow flexion (degrees) for rotation estimate to be reliable.
 # Below this, the forearm is nearly collinear with the upper arm, making
@@ -130,6 +138,19 @@ class ArmAngles:
     shoulder_rotation: float
     elbow_flexion: float
     rotation_reliable: bool
+    side: str = "right"
+
+
+@dataclass
+class BilateralArmAngles:
+    """
+    Joint angles for both upper limbs computed from a single frame.
+
+    Either side may be None when its landmarks are missing or degenerate
+    (e.g. one arm fully occluded) while the other remains trackable.
+    """
+    right: ArmAngles | None
+    left:  ArmAngles | None
 
 
 def _compute_shoulder_angles(
@@ -302,42 +323,26 @@ def _compute_elbow_flexion(
     return max(0.0, math.degrees(math.acos(cos_ang)))
 
 
-def compute_arm_angles(landmarks) -> ArmAngles | None:
+def _compute_side_angles(landmarks, frame: TorsoFrame, side: str) -> ArmAngles | None:
     """
-    Compute all four arm joint angles from a MediaPipe landmark list.
+    Compute the four joint angles for one arm given a prebuilt torso frame.
 
-    This is the main entry point for the angle computation pipeline.
-
-    Parameters
-    ----------
-    landmarks : list
-        MediaPipe 33-landmark list with pseudo-3D (.x, .y, .z) coordinates.
-
-    Returns
-    -------
-    ArmAngles or None
-        Returns None if required landmarks are missing or the torso frame
-        cannot be constructed (e.g., full-body occlusion).
-
-    Pipeline
-    --------
-    1. Build torso coordinate frame from hip/shoulder landmarks.
-    2. Extract right-arm segment vectors (shoulder→elbow, elbow→wrist).
-    3. Transform arm vectors into the torso frame.
-    4. Decompose shoulder orientation using ZXY Euler angles.
-    5. Estimate shoulder rotation from forearm proxy.
-    6. Compute elbow flexion from segment dot product.
+    Left-arm handling: after transforming the segment vectors into the torso
+    frame, the lateral (X) component is negated — a reflection across the
+    sagittal (YZ) plane. The right-arm ZXY decomposition then yields
+    anatomically mirrored conventions for the left arm:
+        abduction (+) = away from the midline for BOTH arms
+        flexion   (+) = forward for BOTH arms
+        rotation  (+) = internal rotation for BOTH arms
+    Elbow flexion uses only a dot product and is reflection-invariant.
     """
-    # Step 1: Build torso frame
-    frame = build_torso_frame(landmarks)
-    if frame is None:
-        return None
+    idx_shoulder, idx_elbow, idx_wrist = _SIDE_LANDMARKS[side]
 
-    # Step 2: Extract world-space arm segment vectors
+    # Extract world-space arm segment vectors
     try:
-        p_shoulder = _to_array(landmarks[LM_RIGHT_SHOULDER])
-        p_elbow    = _to_array(landmarks[LM_RIGHT_ELBOW])
-        p_wrist    = _to_array(landmarks[LM_RIGHT_WRIST])
+        p_shoulder = _to_array(landmarks[idx_shoulder])
+        p_elbow    = _to_array(landmarks[idx_elbow])
+        p_wrist    = _to_array(landmarks[idx_wrist])
     except (IndexError, TypeError):
         return None
 
@@ -347,20 +352,26 @@ def compute_arm_angles(landmarks) -> ArmAngles | None:
     if np.linalg.norm(v_upper_arm_world) < 1e-9:
         return None
 
-    # Step 3: Transform to torso frame
+    # Transform to torso frame
     v_upper_arm_torso = world_to_torso(v_upper_arm_world, frame)
     v_forearm_torso   = world_to_torso(v_forearm_world,   frame)
+
+    # Mirror the left arm across the sagittal plane so the right-arm
+    # formulas apply with mirrored anatomical sign conventions.
+    if side == "left":
+        v_upper_arm_torso = v_upper_arm_torso * np.array([-1.0, 1.0, 1.0])
+        v_forearm_torso   = v_forearm_torso   * np.array([-1.0, 1.0, 1.0])
 
     # Normalise (needed for arcsin / atan2)
     v_upper_arm_unit  = _normalize(v_upper_arm_torso)
 
-    # Step 4: Shoulder flexion and abduction (ZXY decomposition)
+    # Shoulder flexion and abduction (ZXY decomposition)
     flexion, abduction = _compute_shoulder_angles(v_upper_arm_unit)
 
-    # Step 5: Elbow flexion
+    # Elbow flexion (world vectors; dot product is reflection-invariant)
     elbow = _compute_elbow_flexion(v_upper_arm_world, v_forearm_world)
 
-    # Step 6: Shoulder rotation (forearm proxy)
+    # Shoulder rotation (forearm proxy)
     rotation, rot_reliable = _compute_shoulder_rotation(
         v_upper_arm_unit,
         _normalize(v_forearm_torso) if np.linalg.norm(v_forearm_torso) > 1e-9
@@ -374,4 +385,67 @@ def compute_arm_angles(landmarks) -> ArmAngles | None:
         shoulder_rotation=rotation,
         elbow_flexion=elbow,
         rotation_reliable=rot_reliable,
+        side=side,
+    )
+
+
+def compute_arm_angles(landmarks, side: str = "right") -> ArmAngles | None:
+    """
+    Compute all four arm joint angles from a MediaPipe landmark list.
+
+    This is the main entry point for single-arm angle computation.
+
+    Parameters
+    ----------
+    landmarks : list
+        MediaPipe 33-landmark list with pseudo-3D (.x, .y, .z) coordinates.
+    side : str
+        "right" (default) or "left".
+
+    Returns
+    -------
+    ArmAngles or None
+        Returns None if required landmarks are missing or the torso frame
+        cannot be constructed (e.g., full-body occlusion).
+
+    Pipeline
+    --------
+    1. Build torso coordinate frame from hip/shoulder landmarks.
+    2. Extract arm segment vectors (shoulder→elbow, elbow→wrist).
+    3. Transform arm vectors into the torso frame
+       (left arm: reflect across the sagittal plane).
+    4. Decompose shoulder orientation using ZXY Euler angles.
+    5. Estimate shoulder rotation from forearm proxy.
+    6. Compute elbow flexion from segment dot product.
+    """
+    if side not in _SIDE_LANDMARKS:
+        raise ValueError(f"side must be one of {sorted(_SIDE_LANDMARKS)}, got {side!r}")
+
+    frame = build_torso_frame(landmarks)
+    if frame is None:
+        return None
+
+    return _compute_side_angles(landmarks, frame, side)
+
+
+def compute_bilateral_angles(landmarks) -> BilateralArmAngles | None:
+    """
+    Compute joint angles for BOTH arms from one landmark list.
+
+    The torso frame is built once and shared by both sides, so this is
+    cheaper than two compute_arm_angles() calls.
+
+    Returns
+    -------
+    BilateralArmAngles or None
+        None only when the torso frame itself cannot be constructed.
+        Otherwise each side is an ArmAngles or None independently.
+    """
+    frame = build_torso_frame(landmarks)
+    if frame is None:
+        return None
+
+    return BilateralArmAngles(
+        right=_compute_side_angles(landmarks, frame, "right"),
+        left=_compute_side_angles(landmarks, frame, "left"),
     )

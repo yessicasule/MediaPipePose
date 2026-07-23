@@ -34,11 +34,17 @@ import numpy as np
 # ── Data types ───────────────────────────────────────────────────────────────
 
 JOINTS = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
+JOINTS_LEFT = [f"left_{j}" for j in JOINTS]
+JOINTS_BILATERAL = JOINTS + JOINTS_LEFT
 JOINT_LABELS = {
     "shoulder_flexion":   "Shoulder Flexion",
     "shoulder_abduction": "Shoulder Abduction",
     "shoulder_rotation":  "Shoulder Rotation",
     "elbow_flexion":      "Elbow Flexion",
+    "left_shoulder_flexion":   "L Shoulder Flexion",
+    "left_shoulder_abduction": "L Shoulder Abduction",
+    "left_shoulder_rotation":  "L Shoulder Rotation",
+    "left_elbow_flexion":      "L Elbow Flexion",
 }
 
 
@@ -55,6 +61,9 @@ class JointMetrics:
     pck_10:    float    # % frames within ±10°
     pck_15:    float    # % frames within ±15°
     jitter:    float    # Mean |Δangle| frame-to-frame (predicted signal)
+    r2:        float = float("nan")   # Coefficient of determination
+    mae_ci95_lo: float = float("nan") # 95% CI on MAE (normal approx.)
+    mae_ci95_hi: float = float("nan")
 
 
 @dataclass
@@ -67,6 +76,7 @@ class FrameworkMetrics:
     mpjae:           float = 0.0   # Mean Per-Joint Angle Error
     mean_rmse:       float = 0.0
     mean_r:          float = 0.0
+    mean_r2:         float = float("nan")
     mean_pck_5:      float = 0.0
     mean_pck_10:     float = 0.0
     mean_jitter:     float = 0.0
@@ -96,7 +106,18 @@ def compute_joint_metrics(
     JointMetrics
     """
     assert len(pred) == len(gt), f"Length mismatch: pred={len(pred)}, gt={len(gt)}"
+
+    # Exclude frames where either signal is NaN (untracked frame or
+    # missing GT) — metrics must come only from genuinely observed pairs.
+    valid = ~(np.isnan(pred) | np.isnan(gt))
+    pred  = np.asarray(pred, dtype=np.float64)[valid]
+    gt    = np.asarray(gt,   dtype=np.float64)[valid]
+
     n   = len(pred)
+    if n == 0:
+        nan = float("nan")
+        return JointMetrics(joint=joint, n=0, mae=nan, rmse=nan, bias=nan,
+                            r=nan, pck_5=nan, pck_10=nan, pck_15=nan, jitter=nan)
     err = pred - gt
 
     mae  = float(np.mean(np.abs(err)))
@@ -108,6 +129,17 @@ def compute_joint_metrics(
         r = float(np.corrcoef(pred, gt)[0, 1])
     else:
         r = float("nan")
+
+    # Coefficient of determination: R² = 1 − SS_res / SS_tot
+    ss_tot = float(np.sum((gt - np.mean(gt)) ** 2))
+    r2 = float(1.0 - np.sum(err ** 2) / ss_tot) if ss_tot > 1e-9 else float("nan")
+
+    # 95% CI on the MAE (normal approximation: mean ± 1.96·SE of |err|)
+    if n > 1:
+        se = float(np.std(np.abs(err), ddof=1) / np.sqrt(n))
+        mae_ci_lo, mae_ci_hi = mae - 1.96 * se, mae + 1.96 * se
+    else:
+        mae_ci_lo = mae_ci_hi = float("nan")
 
     # PCK at 5°, 10°, 15°
     abs_err = np.abs(err)
@@ -123,6 +155,7 @@ def compute_joint_metrics(
         mae=mae, rmse=rmse, bias=bias, r=r,
         pck_5=pck_5, pck_10=pck_10, pck_15=pck_15,
         jitter=jitter,
+        r2=r2, mae_ci95_lo=mae_ci_lo, mae_ci95_hi=mae_ci_hi,
     )
 
 
@@ -156,7 +189,7 @@ def evaluate_framework(
     n      = len(next(iter(gt_arrays.values())))
     result = FrameworkMetrics(framework=framework, n_frames=n)
 
-    maes, rmses, rs, pck5s, jitters = [], [], [], [], []
+    maes, rmses, rs, r2s, pck5s, jitters = [], [], [], [], [], []
 
     for j in joints:
         if j not in pred_arrays or j not in gt_arrays:
@@ -167,12 +200,15 @@ def evaluate_framework(
         rmses.append(jm.rmse)
         if not np.isnan(jm.r):
             rs.append(jm.r)
+        if not np.isnan(jm.r2):
+            r2s.append(jm.r2)
         pck5s.append(jm.pck_5)
         jitters.append(jm.jitter)
 
     result.mpjae      = float(np.mean(maes))      if maes    else float("nan")
     result.mean_rmse  = float(np.mean(rmses))     if rmses   else float("nan")
     result.mean_r     = float(np.mean(rs))        if rs      else float("nan")
+    result.mean_r2    = float(np.mean(r2s))       if r2s     else float("nan")
     result.mean_pck_5 = float(np.mean(pck5s))     if pck5s   else float("nan")
     result.mean_jitter = float(np.mean(jitters))  if jitters else float("nan")
 
@@ -202,13 +238,19 @@ def print_metrics_table(all_results: list[FrameworkMetrics]) -> None:
     row("MPJAE (deg) v",   [f"{r.mpjae:.2f}"                 for r in all_results])
     row("Mean RMSE (deg) v", [f"{r.mean_rmse:.2f}"            for r in all_results])
     row("Pearson r ^",     [f"{r.mean_r:.3f}"               for r in all_results])
+    row("R2 ^",            [f"{r.mean_r2:.3f}"              for r in all_results])
     row("PCK@5deg ^",      [f"{r.mean_pck_5:.1f}%"          for r in all_results])
     row("Jitter (deg/fr) v", [f"{r.mean_jitter:.2f}"          for r in all_results])
     row(sep[:26],          [sep[:col_w]] * len(names))
 
-    # Per-joint breakdown
-    for j in JOINTS:
-        label = JOINT_LABELS[j]
+    # Per-joint breakdown (all joints present in any result)
+    seen: list[str] = []
+    for r in all_results:
+        for j in r.joints:
+            if j not in seen:
+                seen.append(j)
+    for j in seen:
+        label = JOINT_LABELS.get(j, j)
         row(f"{label[:24]} MAE",
             [f"{r.joints[j].mae:.2f}°" if j in r.joints else "N/A"
              for r in all_results])
@@ -236,6 +278,7 @@ def metrics_to_dict(results: list[FrameworkMetrics]) -> list[dict]:
             "mpjae":        r.mpjae,
             "mean_rmse":    r.mean_rmse,
             "mean_r":       r.mean_r,
+            "mean_r2":      r.mean_r2 if not np.isnan(r.mean_r2) else None,
             "mean_pck_5":   r.mean_pck_5,
             "mean_pck_10":  max((jm.pck_10 for jm in r.joints.values()), default=0.0),
             "mean_jitter":  r.mean_jitter,
@@ -244,9 +287,12 @@ def metrics_to_dict(results: list[FrameworkMetrics]) -> list[dict]:
         for j, jm in r.joints.items():
             d["joints"][j] = {
                 "mae":    jm.mae,
+                "mae_ci95": [jm.mae_ci95_lo, jm.mae_ci95_hi]
+                            if not np.isnan(jm.mae_ci95_lo) else None,
                 "rmse":   jm.rmse,
                 "bias":   jm.bias,
                 "r":      jm.r if not np.isnan(jm.r) else None,
+                "r2":     jm.r2 if not np.isnan(jm.r2) else None,
                 "pck_5":  jm.pck_5,
                 "pck_10": jm.pck_10,
                 "pck_15": jm.pck_15,

@@ -75,12 +75,14 @@ from typing import Iterator
 import numpy as np
 
 # --------------------------------------------------------------------------
-# H3.6M right-arm joint indices (standard 33-joint skeleton)
+# H3.6M arm joint indices (standard 33-joint skeleton)
 # --------------------------------------------------------------------------
 H36M_RSHOULDER = 25
 H36M_RELBOW    = 26
 H36M_RWRIST    = 27
 H36M_LSHOULDER = 17
+H36M_LELBOW    = 18
+H36M_LWRIST    = 19
 H36M_RHIP      = 1
 H36M_LHIP      = 6
 H36M_CHEST     = 14   # spine1 / chest — superior torso reference
@@ -93,7 +95,14 @@ ROT_RELIABLE_THRESHOLD = 25.0
 
 @dataclass
 class GTAngles:
-    """Ground-truth arm joint angles from H3.6M (degrees)."""
+    """
+    Ground-truth bilateral arm joint angles from H3.6M (degrees).
+
+    The unprefixed fields are the RIGHT arm (kept for backward
+    compatibility); left-arm fields carry the ``left_`` prefix and use
+    the mirrored anatomical convention (abduction + = away from midline,
+    internal rotation + for both sides).
+    """
     shoulder_flexion:   float
     shoulder_abduction: float
     shoulder_rotation:  float
@@ -102,11 +111,80 @@ class GTAngles:
     frame_idx:          int = 0
     subject:            str = ""
     action:             str = ""
+    left_shoulder_flexion:   float = float("nan")
+    left_shoulder_abduction: float = float("nan")
+    left_shoulder_rotation:  float = float("nan")
+    left_elbow_flexion:      float = float("nan")
+    left_rotation_reliable:  bool = False
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v / n if n > 1e-9 else v
+
+
+def _compute_side_gt(
+    R: np.ndarray,
+    p_shoulder: np.ndarray,
+    p_elbow: np.ndarray,
+    p_wrist: np.ndarray,
+    mirror: bool,
+) -> tuple[float, float, float, float, bool] | None:
+    """
+    Compute (flexion, abduction, rotation, elbow, rot_reliable) for one arm.
+
+    `mirror=True` (left arm) reflects the torso-frame vectors across the
+    sagittal plane so the right-arm formulas yield mirrored anatomical
+    conventions — identical to angle_solver._compute_side_angles().
+    """
+    v_upper_arm_world = p_elbow - p_shoulder
+    v_forearm_world   = p_wrist - p_elbow
+
+    if np.linalg.norm(v_upper_arm_world) < 1e-9:
+        return None
+
+    v_ua_torso = R.T @ v_upper_arm_world      # [x_lat, y_sup, z_ant]
+    v_fa_torso = R.T @ v_forearm_world
+
+    if mirror:
+        v_ua_torso = v_ua_torso * np.array([-1.0, 1.0, 1.0])
+        v_fa_torso = v_fa_torso * np.array([-1.0, 1.0, 1.0])
+
+    u_ua = _normalize(v_ua_torso)
+    vx, vy, vz = u_ua[0], u_ua[1], u_ua[2]
+
+    # Shoulder flexion-extension: atan2(-vz, -vy)
+    flexion_deg = math.degrees(math.atan2(-vz, -vy))
+
+    # Shoulder abduction-adduction (right-arm convention → negate vx)
+    vx_clamped    = float(np.clip(-vx, -1.0, 1.0))
+    abduction_deg = math.degrees(math.asin(vx_clamped))
+
+    # Elbow flexion
+    u_fa = _normalize(v_fa_torso) if np.linalg.norm(v_fa_torso) > 1e-9 else v_fa_torso
+    cos_ang   = float(np.clip(np.dot(u_ua, u_fa), -1.0, 1.0))
+    elbow_deg = max(0.0, math.degrees(math.acos(cos_ang)))
+
+    # Shoulder rotation (forearm proxy)
+    rotation_deg = 0.0
+    rot_reliable = elbow_deg >= ROT_RELIABLE_THRESHOLD
+
+    if rot_reliable and np.linalg.norm(v_fa_torso) > 1e-9:
+        f_perp = u_fa - np.dot(u_fa, u_ua) * u_ua
+        f_norm = np.linalg.norm(f_perp)
+        if f_norm > 1e-9:
+            f_perp /= f_norm
+            ref = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(u_ua, ref)) > 0.9:
+                ref = np.array([0.0, 0.0, 1.0])
+            e1 = _normalize(np.cross(u_ua, ref))
+            e2 = np.cross(u_ua, e1)
+            rotation_deg = math.degrees(math.atan2(
+                float(np.dot(f_perp, e1)),
+                float(np.dot(f_perp, e2)),
+            ))
+
+    return flexion_deg, abduction_deg, rotation_deg, elbow_deg, rot_reliable
 
 
 def _compute_gt_angles(joints: np.ndarray, frame_idx: int = 0) -> GTAngles | None:
@@ -131,9 +209,10 @@ def _compute_gt_angles(joints: np.ndarray, frame_idx: int = 0) -> GTAngles | Non
         r_elbow    = joints[H36M_RELBOW]
         r_wrist    = joints[H36M_RWRIST]
         l_shoulder = joints[H36M_LSHOULDER]
+        l_elbow    = joints[H36M_LELBOW]
+        l_wrist    = joints[H36M_LWRIST]
         r_hip      = joints[H36M_RHIP]
         l_hip      = joints[H36M_LHIP]
-        chest      = joints[H36M_CHEST]
     except IndexError:
         return None
 
@@ -157,60 +236,31 @@ def _compute_gt_angles(joints: np.ndarray, frame_idx: int = 0) -> GTAngles | Non
     # R: columns are [x_axis, y_axis, z_axis]
     R = np.column_stack([x_axis, y_cand, z_axis])
 
-    # ── Step 2: Upper arm in torso frame ──────────────────────────────────────
-    v_upper_arm_world = r_elbow - r_shoulder
-    v_forearm_world   = r_wrist  - r_elbow
-
-    if np.linalg.norm(v_upper_arm_world) < 1e-9:
+    # ── Step 2: Per-side angle computation (right required, left optional) ────
+    right = _compute_side_gt(R, r_shoulder, r_elbow, r_wrist, mirror=False)
+    if right is None:
         return None
+    left = _compute_side_gt(R, l_shoulder, l_elbow, l_wrist, mirror=True)
 
-    v_ua_torso = R.T @ v_upper_arm_world      # [x_lat, y_sup, z_ant]
-    v_fa_torso = R.T @ v_forearm_world
+    r_flex, r_abd, r_rot, r_elb, r_rel = right
 
-    u_ua = _normalize(v_ua_torso)
-
-    vx, vy, vz = u_ua[0], u_ua[1], u_ua[2]
-
-    # ── Step 3: Shoulder flexion-extension ───────────────────────────────────
-    # atan2(-vz, -vy)  → 0° when arm hangs down, +90° when arm forward
-    flexion_deg = math.degrees(math.atan2(-vz, -vy))
-
-    # ── Step 4: Shoulder abduction-adduction (RIGHT arm → negate vx) ─────────
-    vx_clamped    = float(np.clip(-vx, -1.0, 1.0))
-    abduction_deg = math.degrees(math.asin(vx_clamped))
-
-    # ── Step 5: Elbow flexion ─────────────────────────────────────────────────
-    u_fa = _normalize(v_fa_torso) if np.linalg.norm(v_fa_torso) > 1e-9 else v_fa_torso
-    cos_ang    = float(np.clip(np.dot(u_ua, u_fa), -1.0, 1.0))
-    elbow_deg  = max(0.0, math.degrees(math.acos(cos_ang)))
-
-    # ── Step 6: Shoulder rotation (forearm proxy) ─────────────────────────────
-    rotation_deg = 0.0
-    rot_reliable = elbow_deg >= ROT_RELIABLE_THRESHOLD
-
-    if rot_reliable and np.linalg.norm(v_fa_torso) > 1e-9:
-        f_perp = u_fa - np.dot(u_fa, u_ua) * u_ua
-        f_norm = np.linalg.norm(f_perp)
-        if f_norm > 1e-9:
-            f_perp /= f_norm
-            ref = np.array([1.0, 0.0, 0.0])
-            if abs(np.dot(u_ua, ref)) > 0.9:
-                ref = np.array([0.0, 0.0, 1.0])
-            e1 = _normalize(np.cross(u_ua, ref))
-            e2 = np.cross(u_ua, e1)
-            rotation_deg = math.degrees(math.atan2(
-                float(np.dot(f_perp, e1)),
-                float(np.dot(f_perp, e2)),
-            ))
-
-    return GTAngles(
-        shoulder_flexion   = round(flexion_deg,   4),
-        shoulder_abduction = round(abduction_deg, 4),
-        shoulder_rotation  = round(rotation_deg,  4),
-        elbow_flexion      = round(elbow_deg,      4),
-        rotation_reliable  = rot_reliable,
+    gt = GTAngles(
+        shoulder_flexion   = round(r_flex, 4),
+        shoulder_abduction = round(r_abd,  4),
+        shoulder_rotation  = round(r_rot,  4),
+        elbow_flexion      = round(r_elb,  4),
+        rotation_reliable  = r_rel,
         frame_idx          = frame_idx,
     )
+    if left is not None:
+        l_flex, l_abd, l_rot, l_elb, l_rel = left
+        gt.left_shoulder_flexion   = round(l_flex, 4)
+        gt.left_shoulder_abduction = round(l_abd,  4)
+        gt.left_shoulder_rotation  = round(l_rot,  4)
+        gt.left_elbow_flexion      = round(l_elb,  4)
+        gt.left_rotation_reliable  = l_rel
+
+    return gt
 
 
 def parse_h36m_file(txt_path: Path) -> list[GTAngles]:
@@ -257,6 +307,7 @@ def iter_h36m_dataset(
     h36m_dir:  Path,
     subjects:  list[str] | None = None,
     max_frames: int | None = None,
+    per_subject: bool = True,
 ) -> Iterator[GTAngles]:
     """
     Iterate over all H3.6M skeleton files and yield GTAngles.
@@ -268,7 +319,12 @@ def iter_h36m_dataset(
     subjects : list[str], optional
         Which subjects to include. Defaults to all standard subjects.
     max_frames : int, optional
-        Global cap on total frames yielded. Useful for quick testing.
+        Cap on total frames yielded. Useful for quick testing.
+    per_subject : bool
+        When True (default) the max_frames budget is divided evenly
+        across subjects, so a capped run still covers EVERY requested
+        subject — required for the test-split and LOSO protocols.
+        When False the cap is global and fills from the first subject.
 
     Yields
     ------
@@ -278,14 +334,25 @@ def iter_h36m_dataset(
     h36m_dir = Path(h36m_dir)
     yielded  = 0
 
+    subject_budget = None
+    if max_frames is not None and per_subject and subjects:
+        subject_budget = max(1, max_frames // len(subjects))
+
     for subject in subjects:
         subj_dir = h36m_dir / subject
         if not subj_dir.exists():
             print(f"  [h36m_loader] SKIP: {subj_dir} not found")
             continue
+        yielded_subject = 0
         for txt_path in sorted(subj_dir.glob("*.txt")):
             for gt in parse_h36m_file(txt_path):
                 yield gt
                 yielded += 1
+                yielded_subject += 1
                 if max_frames is not None and yielded >= max_frames:
                     return
+                if subject_budget is not None and yielded_subject >= subject_budget:
+                    break
+            else:
+                continue
+            break

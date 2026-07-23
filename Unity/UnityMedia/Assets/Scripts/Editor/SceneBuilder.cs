@@ -4,9 +4,14 @@
 // Editor utility to automatically build the MonoArm scene.
 //
 // Menu: MonoArm / Build Scene
-//   1. Finds the humanoid avatar in the scene (or loads X Bot as fallback).
+//   1. Strips the scene down to a single humanoid: destroys every extra
+//      avatar, comparison Label_* object, and root Canvas left over from
+//      multi-framework comparison scenes (e.g. the MediaPipe/MoveNet/
+//      DeepFusionPose/GAN comparison view), and collapses duplicate
+//      PoseManager/MonoArmManager objects.
 //   2. Attaches AvatarMuscleController, UdpAngleReceiver, MonoArmManager,
-//      and PoseDebugUI to a PoseManager GameObject.
+//      and PoseDebugUI to a PoseManager GameObject driving the one
+//      remaining avatar.
 //   3. Positions the camera for a clear avatar view.
 //   4. Saves the scene.
 //
@@ -31,12 +36,16 @@ namespace MonoArm
         [MenuItem("MonoArm/Build Scene")]
         static void Build()
         {
-            // Remove old MonoArm manager objects (not the avatar)
-            foreach (var name in new[] { "PoseManager", "MonoArmManager" })
-            {
-                var go = GameObject.Find(name);
-                if (go != null) Undo.DestroyObjectImmediate(go);
-            }
+            Undo.IncrementCurrentGroup();
+            Undo.SetCurrentGroupName("MonoArm Build Scene");
+            int undoGroup = Undo.GetCurrentGroup();
+
+            CollapseToSingleAvatar();
+
+            // Remove old MonoArm manager objects (not the avatar) — including
+            // any duplicates left behind by repeated builds.
+            DestroyAllNamed("PoseManager");
+            DestroyAllNamed("MonoArmManager");
 
             // Find or instantiate humanoid avatar
             GameObject avatar = FindHumanoidInScene();
@@ -46,6 +55,7 @@ namespace MonoArm
                 string[] guids = AssetDatabase.FindAssets("X Bot t:GameObject");
                 if (guids.Length == 0)
                 {
+                    Undo.CollapseUndoOperations(undoGroup);
                     EditorUtility.DisplayDialog("MonoArm — No Avatar Found",
                         "No Humanoid avatar is in the scene and no 'X Bot' asset was found.\n\n" +
                         "Please drag a Humanoid-rigged FBX into the scene, then run Build Scene again.\n\n" +
@@ -57,14 +67,22 @@ namespace MonoArm
                 var    prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
                 avatar        = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
                 avatar.name   = "Avatar_MonoArm";
-                avatar.transform.position = Vector3.zero;
                 Debug.Log($"[SceneBuilder] Instantiated {path} as avatar.");
             }
+
+            // Reset transform to the origin, facing the camera. The avatar may carry
+            // a stale position/rotation override from a former multi-avatar layout
+            // (e.g. one slot in a side-by-side comparison row), which would otherwise
+            // leave it outside the camera's view after collapsing to a single avatar.
+            Undo.RecordObject(avatar.transform, "Build MonoArm Scene");
+            avatar.transform.position = Vector3.zero;
+            avatar.transform.rotation = Quaternion.identity;
 
             // Check humanoid rig
             var animator = avatar.GetComponentInChildren<Animator>();
             if (animator == null || !animator.isHuman)
             {
+                Undo.CollapseUndoOperations(undoGroup);
                 EditorUtility.DisplayDialog("MonoArm — Humanoid Required",
                     $"'{avatar.name}' is not configured as a Humanoid.\n\n" +
                     "Select the FBX in the Project window → Inspector → Rig → " +
@@ -73,8 +91,9 @@ namespace MonoArm
                 return;
             }
 
-            // Remove any stale components
+            // Remove any stale components from a previous build
             RemoveComponent<AvatarMuscleController>(avatar);
+            RemoveComponent<PoseDebugUI>(avatar);
 
             // Add AvatarMuscleController to the avatar
             var ctrl = Undo.AddComponent<AvatarMuscleController>(avatar);
@@ -102,9 +121,10 @@ namespace MonoArm
             }
 
             EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+            Undo.CollapseUndoOperations(undoGroup);
 
             EditorUtility.DisplayDialog("MonoArm — Scene Built",
-                $"Scene built successfully!\n\n" +
+                $"Scene collapsed to a single humanoid and wired up.\n\n" +
                 $"Avatar:  {avatar.name}\n" +
                 $"UDP port: {receiver.listenPort}\n\n" +
                 "Next steps:\n" +
@@ -115,6 +135,74 @@ namespace MonoArm
                 "   python scripts/mock_streamer.py --mode sinusoidal\n" +
                 "3. Press Play in Unity.",
                 "OK");
+        }
+
+        // ── Collapse comparison scene → single avatar ───────────────────────
+
+        /// <summary>
+        /// Destroys everything left over from a multi-avatar comparison scene
+        /// (extra humanoid avatars, "Label_*" world-space overlays, root
+        /// Canvas objects) so exactly one humanoid avatar remains for the
+        /// live UDP-driven MonoArm demo.
+        /// </summary>
+        static void CollapseToSingleAvatar()
+        {
+            // Keep exactly one humanoid Animator; destroy the rest.
+            var humanoids = Object.FindObjectsOfType<Animator>(true)
+                .Where(a => a != null && a.isHuman && a.gameObject.scene.IsValid())
+                .Select(a => a.gameObject)
+                .Distinct()
+                .ToList();
+
+            if (humanoids.Count > 1)
+            {
+                GameObject keep =
+                    humanoids.FirstOrDefault(g => g.name == "Avatar_MediaPipe") ??
+                    humanoids.FirstOrDefault(g => g.GetComponent<AvatarMuscleController>() != null) ??
+                    humanoids[0];
+
+                foreach (var g in humanoids)
+                {
+                    if (g == keep) continue;
+                    Debug.Log($"[SceneBuilder] Removing extra avatar '{g.name}' (collapsing to single humanoid).");
+                    Undo.DestroyObjectImmediate(g);
+                }
+
+                keep.name = "Avatar_MonoArm";
+            }
+            else if (humanoids.Count == 1)
+            {
+                humanoids[0].name = "Avatar_MonoArm";
+            }
+
+            // Destroy comparison-view overlays: root Canvas objects and any
+            // "Label_*" objects (per-framework text overlays), plus stray
+            // duplicates of "New Text".
+            foreach (var c in Object.FindObjectsOfType<Canvas>(true))
+            {
+                if (c == null || !c.gameObject.scene.IsValid()) continue;
+                if (c.transform.parent != null) continue; // leave avatar-parented UI (e.g. PoseDebugUI) alone
+                Debug.Log($"[SceneBuilder] Removing comparison Canvas '{c.gameObject.name}'.");
+                Undo.DestroyObjectImmediate(c.gameObject);
+            }
+
+            foreach (var t in Object.FindObjectsOfType<Transform>(true))
+            {
+                if (t == null || t.parent != null) continue; // root objects only
+                if (!t.gameObject.scene.IsValid()) continue;
+                if (t.name.StartsWith("Label_") || t.name == "New Text")
+                {
+                    Debug.Log($"[SceneBuilder] Removing comparison overlay '{t.name}'.");
+                    Undo.DestroyObjectImmediate(t.gameObject);
+                }
+            }
+        }
+
+        static void DestroyAllNamed(string name)
+        {
+            GameObject go;
+            while ((go = GameObject.Find(name)) != null)
+                Undo.DestroyObjectImmediate(go);
         }
 
         // ── Diagnose ─────────────────────────────────────────────────────────

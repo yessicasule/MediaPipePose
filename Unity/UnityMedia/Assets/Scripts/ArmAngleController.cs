@@ -189,7 +189,7 @@ namespace MonoArm
                 string n = names[i];
                 if (n == "Right Arm Front-Back")  _idxFlexion   = i;
                 else if (n == "Right Arm Down-Up")     _idxAbduction = i;
-                else if (n == "Right Arm Roll In-Out")  _idxRotation  = i;
+                else if (n.Contains("Right Arm Roll") || n.Contains("Right Arm Twist") || n.Contains("Right Arm In-Out"))  _idxRotation  = i;
                 else if (n == "Right Forearm Stretch")  _idxElbow     = i;
             }
 
@@ -198,13 +198,20 @@ namespace MonoArm
 
             if (!ok)
             {
+                string available = "";
+                for(int i=0; i<names.Length; i++) {
+                    if (names[i].Contains("Right Arm") || names[i].Contains("Right Forearm")) {
+                        available += " - " + names[i] + "\n";
+                    }
+                }
                 Debug.LogError(
                     "[AvatarMuscleController] One or more right-arm muscle indices not found.\n" +
                     "Ensure the avatar is configured as Humanoid in the FBX import settings.\n" +
                     $"  Flexion idx   = {_idxFlexion}\n" +
                     $"  Abduction idx = {_idxAbduction}\n" +
                     $"  Rotation idx  = {_idxRotation}\n" +
-                    $"  Elbow idx     = {_idxElbow}");
+                    $"  Elbow idx     = {_idxElbow}\n" +
+                    $"Available right arm muscles in this Unity version:\n{available}");
                 enabled = false;
             }
             else

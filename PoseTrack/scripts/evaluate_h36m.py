@@ -8,68 +8,81 @@ needed for the IEEE conference paper's quantitative evaluation section.
 
 Pipeline
 --------
-    1. Load H3.6M skeleton files → extract GT angles using ZXY anatomical
-       decomposition (same convention as the live MonoArm pipeline).
+    1. Load H3.6M skeleton files → extract BILATERAL (left + right arm) GT
+       angles using ZXY anatomical decomposition (same convention as the
+       live MonoArm pipeline).
     2. Run each pose estimation framework over the corresponding H3.6M video
-       frames (if available) OR use the high-fidelity synthetic noise model
-       from build_h36m_dataset.py (when frames are unavailable).
-    3. Compute MAE, RMSE, Pearson r, PCK@5°/10°/15°, jitter for each
-       framework × joint combination.
-    4. Export JSON metrics table and 5 publication-quality figures.
+       frames (raw, unfiltered predictions).
+    3. Compute MAE (±95% CI), RMSE, Pearson r, R², PCK@5°/10°/15°, jitter
+       for each framework × joint combination.
+    4. Statistical significance: pairwise paired t-tests, Wilcoxon
+       signed-rank tests, Cohen's d, bootstrap CIs, Holm-Bonferroni
+       correction (src/evaluation/statistics.py).
+    5. Filter ablation: none / MA / Savitzky-Golay / 2-state Kalman applied
+       causally to each framework's predictions and scored against GT.
+    6. Export: Excel workbook (summary + ranking, per-joint metrics,
+       statistical tests, ablation, frame-level data, reproducibility
+       metadata), frame-level CSV, JSON reports, LaTeX table, and 5
+       publication-quality figures.
 
-Evaluation Modes
-----------------
-    --mode synthetic  (default)
-        Uses the synthetic noise model to generate framework predictions
-        directly from H3.6M GT angles. No video frames or network models
-        needed. Suitable when H3.6M video access is unavailable.
-
-        Noise profiles (calibrated to published cross-validation results):
-            MediaPipe:   μ=0°, σ=3.0°  (Bazarevsky et al., 2020)
-            MoveNet:     μ=0.5°, σ=5.0° (Google, 2021)
-            PoseNet:     μ=1.2°, σ=8.0° (Papandreou et al., 2018)
-
+Evaluation Modes (--mode is REQUIRED)
+-------------------------------------
     --mode live
-        Runs MediaPipe (and optionally MoveNet/PoseNet) on H3.6M video
-        frames extracted from the dataset. Requires:
+        Runs the real pose estimation frameworks on H3.6M video frames.
+        This is the ONLY mode whose results are publication-grade.
+        Requires:
             (a) H3.6M video download from http://vision.imar.ro/human3.6m/
             (b) Frame extraction with --frame_dir argument
 
+    --mode csv
+        Loads previously computed real predictions from a dataset CSV
+        (build_h36m_dataset.py). Publication-grade if the CSV was built
+        from real framework output.
+
+    --mode synthetic
+        PIPELINE SMOKE TEST ONLY. Simulates predictions as GT + Gaussian
+        noise. All outputs are tagged publication_grade=false and MUST
+        NOT be reported as experimental results.
+
+Protocols
+---------
+    --protocol test-split  (default)
+        H3.6M standard split: parameters tuned on S1/S5/S6/S7, selection
+        on S8, final evaluation on the held-out test subjects S9/S11.
+    --protocol loso
+        Leave-One-Subject-Out: per-subject metrics for each fold,
+        aggregated mean ± std across folds (exported as a LOSO sheet).
+
 Usage
 -----
-    # Quick validation — synthetic mode (no video needed)
-    python scripts/evaluate_h36m.py \\
-        --h36m_dir data/dataset/h3.6m/dataset \\
-        --mode synthetic \\
-        --subjects S9 S11 \\
-        --max_frames 5000
-
-    # Full live validation (requires extracted frames)
+    # Publication run (requires extracted frames)
     python scripts/evaluate_h36m.py \\
         --h36m_dir data/dataset/h3.6m/dataset \\
         --frame_dir data/dataset/h3.6m/frames \\
         --mode live \\
-        --frameworks mediapipe movenet_lightning
+        --frameworks mediapipe movenet_lightning posenet
 
-    # Use a pre-built dataset CSV (from build_h36m_dataset.py)
+    # Pipeline smoke test (no video needed; NOT for publication)
     python scripts/evaluate_h36m.py \\
-        --csv outputs/unified_dataset.csv \\
-        --mode csv
+        --h36m_dir data/dataset/h3.6m/dataset \\
+        --mode synthetic \\
+        --max_frames 5000
 
 Output
 ------
     outputs/validation/
+        results.xlsx              — Multi-sheet Excel workbook
+        frame_level.csv           — Full frame-level GT/pred/error table
+        metadata.json             — Reproducibility record
         metrics_report.json       — Full per-joint metric tables
+        statistical_tests.json    — Pairwise significance tests
+        filter_ablation.json      — Filter ablation table
+        paper_table.tex           — LaTeX table for the paper
         validation_summary.png    — Summary bar charts (paper-ready)
         bland_altman.png          — Bland-Altman agreement plots
         scatter_gt.png            — Predicted vs. GT scatter + regression
         error_cdf.png             — PCK-style error CDF curve
         timeseries_vs_gt.png      — Sample time-series overlay
-
-Paper Table Format
-------------------
-The JSON report is structured to copy-paste directly into the paper's
-LaTeX table. See outputs/validation/paper_table.tex for the generated table.
 """
 
 from __future__ import annotations
@@ -80,17 +93,27 @@ import sys
 import time
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import numpy as np
 import pandas as pd
 
-from src.evaluation.h36m_loader import iter_h36m_dataset, GTAngles
+from src.evaluation.h36m_loader import iter_h36m_dataset
 from src.evaluation.metrics import (
     evaluate_framework, print_metrics_table, metrics_to_dict,
-    JOINTS, FrameworkMetrics,
+    JOINTS, JOINTS_BILATERAL, FrameworkMetrics,
 )
 from src.evaluation.eval_plots import (
     plot_validation_summary, plot_bland_altman,
     plot_scatter_gt, plot_error_cdf, plot_timeseries_vs_gt,
+)
+from src.evaluation.statistics import compare_systems, comparison_report_to_dicts
+from src.evaluation.ablation import run_filter_ablation
+from src.evaluation.protocol import get_split, loso_folds, describe_protocol
+from src.evaluation.report_export import (
+    build_metadata, export_excel, export_frame_level_csv, export_metadata_json,
 )
 
 # ── Noise profiles for synthetic mode ────────────────────────────────────────
@@ -122,19 +145,25 @@ def load_gt_arrays(
     h36m_dir: Path,
     subjects: list[str],
     max_frames: int | None,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """
-    Load H3.6M ground truth angles into per-joint arrays.
+    Load H3.6M bilateral ground truth angles into per-joint arrays.
 
     Returns
     -------
-    dict[str, np.ndarray]
-        Keys are joint names; values are shape (N,) float arrays.
+    (gt_arrays, meta)
+        gt_arrays: joint name → shape (N,) float array, for both arms
+                   (right joints unprefixed, left joints "left_"-prefixed).
+        meta:      "subject" and "sequence" (subject/action) string arrays
+                   aligned with the GT frames — used for LOSO folds and
+                   filter-reset boundaries.
     """
-    print("[→] Loading H3.6M ground truth...")
+    print("[→] Loading H3.6M ground truth (bilateral)...")
     t0 = time.perf_counter()
 
-    buckets: dict[str, list[float]] = {j: [] for j in JOINTS}
+    buckets: dict[str, list[float]] = {j: [] for j in JOINTS_BILATERAL}
+    subjects_col: list[str] = []
+    sequence_col: list[str] = []
     n = 0
 
     for gt in iter_h36m_dataset(h36m_dir, subjects=subjects, max_frames=max_frames):
@@ -142,6 +171,12 @@ def load_gt_arrays(
         buckets["shoulder_abduction"].append(gt.shoulder_abduction)
         buckets["shoulder_rotation"].append(gt.shoulder_rotation)
         buckets["elbow_flexion"].append(gt.elbow_flexion)
+        buckets["left_shoulder_flexion"].append(gt.left_shoulder_flexion)
+        buckets["left_shoulder_abduction"].append(gt.left_shoulder_abduction)
+        buckets["left_shoulder_rotation"].append(gt.left_shoulder_rotation)
+        buckets["left_elbow_flexion"].append(gt.left_elbow_flexion)
+        subjects_col.append(gt.subject)
+        sequence_col.append(f"{gt.subject}/{gt.action}")
         n += 1
 
     elapsed = time.perf_counter() - t0
@@ -150,7 +185,15 @@ def load_gt_arrays(
     if n == 0:
         print("[!] WARNING: No GT frames loaded. Check h36m_dir path and .txt file format.")
 
-    return {j: np.array(v, dtype=np.float64) for j, v in buckets.items()}
+    gt_arrays = {j: np.array(v, dtype=np.float64) for j, v in buckets.items()}
+    # Drop left-arm joints that are entirely NaN (e.g. malformed skeletons)
+    gt_arrays = {j: a for j, a in gt_arrays.items() if not np.all(np.isnan(a))}
+
+    meta = {
+        "subject":  np.array(subjects_col),
+        "sequence": np.array(sequence_col),
+    }
+    return gt_arrays, meta
 
 
 # ── Synthetic mode ────────────────────────────────────────────────────────────
@@ -182,10 +225,12 @@ def synthetic_predictions(
         profile  = NOISE_PROFILES[fw]
         preds[fw] = {}
         for j, arr in gt_arrays.items():
-            if j not in profile:
+            # Left-arm joints reuse the base joint's noise profile
+            base = j[len("left_"):] if j.startswith("left_") else j
+            if base not in profile:
                 preds[fw][j] = arr.copy()
                 continue
-            mu, sigma = profile[j]
+            mu, sigma = profile[base]
             preds[fw][j] = arr + rng.normal(mu, sigma, size=len(arr))
 
     return preds
@@ -219,11 +264,11 @@ def live_predictions(
     """
     import cv2
     from src.pose import load_estimator
-    from src.processing.angle_solver import compute_arm_angles
-    from src.processing.angle_filter import AngleFilterBank
+    from src.processing.angle_solver import compute_bilateral_angles
 
     n_gt  = len(next(iter(gt_arrays.values())))
     preds: dict[str, dict[str, np.ndarray]] = {}
+    joints = [j for j in JOINTS_BILATERAL if j in gt_arrays] or list(JOINTS)
 
     # Collect sorted frame paths
     frame_paths = sorted(frame_dir.rglob("*.jpg"))
@@ -243,49 +288,50 @@ def live_predictions(
             print(f"  [✗] Could not load {fw_name}: {e}")
             continue
 
-        filt   = AngleFilterBank("kalman", stream_hz=50.0)
-        angles_per_joint: dict[str, list[float]] = {j: [] for j in JOINTS}
+        # RAW predictions — no temporal filtering here. Filtering is a
+        # separate, explicitly ablated stage (src/evaluation/ablation.py),
+        # so framework accuracy and filter effects are never conflated.
+        angles_per_joint: dict[str, list[float]] = {j: [] for j in joints}
 
-        for i, fp in enumerate(frame_paths[:n_frames]):
+        def _append_nan():
+            for j in joints:
+                angles_per_joint[j].append(float("nan"))
+
+        for fp in frame_paths[:n_frames]:
             bgr = cv2.imread(str(fp))
             if bgr is None:
-                for j in JOINTS:
-                    angles_per_joint[j].append(float("nan"))
+                _append_nan()
                 continue
 
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             lms = runner.process(rgb)
 
-            if lms is not None:
-                a = compute_arm_angles(lms)
-                if a is not None:
-                    a = filt.update(a)
-                    angles_per_joint["shoulder_flexion"].append(a.shoulder_flexion)
-                    angles_per_joint["shoulder_abduction"].append(a.shoulder_abduction)
-                    angles_per_joint["shoulder_rotation"].append(a.shoulder_rotation)
-                    angles_per_joint["elbow_flexion"].append(a.elbow_flexion)
-                    continue
+            if lms is None:
+                _append_nan()
+                continue
 
-            for j in JOINTS:
-                angles_per_joint[j].append(float("nan"))
+            bl = compute_bilateral_angles(lms)
+            if bl is None:
+                _append_nan()
+                continue
+
+            side_angles = {"right": bl.right, "left": bl.left}
+            for j in joints:
+                side = "left" if j.startswith("left_") else "right"
+                attr = j[len("left_"):] if j.startswith("left_") else j
+                a = side_angles[side]
+                angles_per_joint[j].append(
+                    getattr(a, attr) if a is not None else float("nan")
+                )
 
         runner.close()
 
-        # Replace NaNs with interpolated values
-        for j in JOINTS:
-            arr = np.array(angles_per_joint[j])
-            nan_mask = np.isnan(arr)
-            if nan_mask.any() and not nan_mask.all():
-                idx   = np.arange(len(arr))
-                valid = idx[~nan_mask]
-                arr   = np.interp(idx, valid, arr[valid])
-            elif nan_mask.all():
-                arr = np.zeros(n_frames)
-            angles_per_joint[j] = arr
-
-        preds[fw_name] = {j: np.array(v) for j, v in angles_per_joint.items()}
-        det_rate = np.mean([not np.isnan(v) for j in JOINTS
-                            for v in angles_per_joint[j]]) * 100
+        # NaN frames (no detection) are kept as NaN and excluded per-joint
+        # by the metrics — never interpolated or fabricated.
+        preds[fw_name] = {j: np.array(v, dtype=np.float64)
+                          for j, v in angles_per_joint.items()}
+        all_vals = np.concatenate(list(preds[fw_name].values()))
+        det_rate = float(np.mean(~np.isnan(all_vals))) * 100 if len(all_vals) else 0.0
         print(f"  [{fw_name}] done. Detection rate ≈ {det_rate:.0f}%")
 
     return preds
@@ -364,16 +410,21 @@ def csv_predictions(
 def export_latex_table(
     all_results: list[FrameworkMetrics],
     out_path: str,
+    publication_grade: bool = True,
 ) -> None:
     """
     Generate a LaTeX table for the IEEE paper evaluation section.
     """
+    caption_note = (
+        "" if publication_grade else
+        " SYNTHETIC SIMULATION — pipeline verification only, NOT experimental results."
+    )
     lines = [
         r"\begin{table}[t]",
         r"\centering",
-        r"\caption{Comparison of pose estimation frameworks on Human3.6M (right arm, ZXY decomposition). "
+        r"\caption{Comparison of pose estimation frameworks on Human3.6M (bilateral arms, ZXY decomposition). "
         r"MPJAE = Mean Per-Joint Angle Error. PCK@5° = \% frames within 5\textdegree. "
-        r"Best result per column in \textbf{bold}.}",
+        r"Best result per column in \textbf{bold}." + caption_note + r"}",
         r"\label{tab:framework_comparison}",
         r"\begin{tabular}{lccccc}",
         r"\hline",
@@ -438,6 +489,78 @@ def export_latex_table(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+SYNTHETIC_WARNING = """
+================================================================================
+  WARNING: --mode synthetic simulates predictions as GT + Gaussian noise.
+  This is a PIPELINE SMOKE TEST. Every output will be tagged
+  publication_grade=false. Do NOT report these numbers as experimental
+  results — use --mode live on real H3.6M frames for publishable metrics.
+================================================================================
+"""
+
+
+def loso_evaluation(
+    gt_arrays: dict[str, np.ndarray],
+    pred_data: dict[str, dict[str, np.ndarray]],
+    subject_col: np.ndarray,
+    joints: list[str],
+) -> list[dict]:
+    """
+    Leave-One-Subject-Out evaluation: metrics per held-out subject,
+    plus mean ± std aggregate rows per framework.
+    """
+    rows: list[dict] = []
+    subjects_present = [s for s in dict.fromkeys(subject_col.tolist()) if s]
+    if len(subjects_present) < 2:
+        print(f"  [!] LOSO needs ≥2 subjects in the loaded data; found "
+              f"{subjects_present}. Increase --max_frames or add --subjects.")
+        return rows
+
+    for fold in loso_folds(subjects_present):
+        mask = subject_col == fold.test_subject
+        if not mask.any():
+            continue
+        gt_fold = {j: a[mask] for j, a in gt_arrays.items()}
+        for fw, fw_preds in pred_data.items():
+            pred_fold = {j: a[mask] for j, a in fw_preds.items() if len(a) == len(mask)}
+            if not pred_fold:
+                continue
+            m = evaluate_framework(fw, pred_fold, gt_fold, joints=joints)
+            rows.append({
+                "fold":          fold.fold_idx,
+                "test_subject":  fold.test_subject,
+                "framework":     fw,
+                "n_frames":      m.n_frames,
+                "MPJAE_deg":     m.mpjae,
+                "RMSE_deg":      m.mean_rmse,
+                "Pearson_r":     m.mean_r,
+                "R2":            m.mean_r2,
+                "PCK@5_pct":     m.mean_pck_5,
+                "jitter_deg_per_frame": m.mean_jitter,
+            })
+
+    # Aggregate mean ± std across folds per framework
+    for fw in pred_data:
+        fw_rows = [r for r in rows if r["framework"] == fw and isinstance(r["fold"], int)]
+        if not fw_rows:
+            continue
+        for stat_name, stat_fn in (("MEAN", np.mean), ("STD", np.std)):
+            rows.append({
+                "fold":          stat_name,
+                "test_subject":  "ALL",
+                "framework":     fw,
+                "n_frames":      int(np.sum([r["n_frames"] for r in fw_rows])),
+                "MPJAE_deg":     float(stat_fn([r["MPJAE_deg"] for r in fw_rows])),
+                "RMSE_deg":      float(stat_fn([r["RMSE_deg"] for r in fw_rows])),
+                "Pearson_r":     float(stat_fn([r["Pearson_r"] for r in fw_rows])),
+                "R2":            float(stat_fn([r["R2"] for r in fw_rows])),
+                "PCK@5_pct":     float(stat_fn([r["PCK@5_pct"] for r in fw_rows])),
+                "jitter_deg_per_frame":
+                    float(stat_fn([r["jitter_deg_per_frame"] for r in fw_rows])),
+            })
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Evaluate MonoArm frameworks against H3.6M ground truth."
@@ -448,21 +571,43 @@ def main() -> None:
                     help="Root of extracted H3.6M frames (live mode only)")
     ap.add_argument("--csv",        default=None,
                     help="Pre-built dataset CSV from build_h36m_dataset.py")
-    ap.add_argument("--mode",       choices=["synthetic", "live", "csv"],
-                    default="synthetic",
-                    help="Evaluation mode (default: synthetic)")
-    ap.add_argument("--subjects",   nargs="+",
-                    default=["S9", "S11"],
-                    help="H3.6M subjects to evaluate (default: S9 S11 for test split)")
+    ap.add_argument("--mode",       choices=["live", "csv", "synthetic"],
+                    required=True,
+                    help="Prediction source. 'live' runs real frameworks on "
+                         "H3.6M frames (publication-grade); 'csv' loads "
+                         "precomputed real predictions; 'synthetic' is a "
+                         "pipeline smoke test (NOT for publication).")
+    ap.add_argument("--protocol",   choices=["test-split", "loso"],
+                    default="test-split",
+                    help="Experimental protocol (default: H3.6M standard "
+                         "test split S9/S11; 'loso' = Leave-One-Subject-Out)")
+    ap.add_argument("--subjects",   nargs="+", default=None,
+                    help="H3.6M subjects to evaluate (default: protocol's "
+                         "subject set)")
     ap.add_argument("--max_frames", type=int, default=10000,
                     help="Maximum GT frames to load (default 10000)")
     ap.add_argument("--frameworks", nargs="+",
                     default=["MediaPipe", "MoveNet-Lightning", "PoseNet"],
                     help="Frameworks to compare")
     ap.add_argument("--seed",       type=int, default=42)
+    ap.add_argument("--alpha",      type=float, default=0.05,
+                    help="Significance level for statistical tests")
+    ap.add_argument("--n_boot",     type=int, default=5000,
+                    help="Bootstrap resamples for confidence intervals")
+    ap.add_argument("--skip_ablation", action="store_true",
+                    help="Skip the filter ablation study")
     ap.add_argument("--output_dir", default="outputs/validation",
                     help="Directory for all output files")
     args = ap.parse_args()
+
+    publication_grade = args.mode != "synthetic"
+    if not publication_grade:
+        print(SYNTHETIC_WARNING)
+
+    if args.subjects is None:
+        from src.evaluation.protocol import H36M_ALL_SUBJECTS
+        args.subjects = (H36M_ALL_SUBJECTS if args.protocol == "loso"
+                         else get_split("test"))
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -470,18 +615,26 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    if args.mode == "csv" and args.csv:
+    meta: dict[str, np.ndarray] | None = None
+
+    if args.mode == "csv":
+        if not args.csv:
+            print("[✗] --mode csv requires --csv <path>")
+            sys.exit(1)
         gt_arrays, pred_data = csv_predictions(Path(args.csv))
 
-    elif args.mode == "live" and args.frame_dir:
-        gt_arrays = load_gt_arrays(Path(args.h36m_dir), args.subjects, args.max_frames)
+    elif args.mode == "live":
+        if not args.frame_dir:
+            print("[✗] --mode live requires --frame_dir <extracted frames>")
+            sys.exit(1)
+        gt_arrays, meta = load_gt_arrays(Path(args.h36m_dir), args.subjects, args.max_frames)
         if not any(len(v) > 0 for v in gt_arrays.values()):
             print("[✗] GT data empty — check h36m_dir")
             sys.exit(1)
         pred_data = live_predictions(gt_arrays, Path(args.frame_dir), args.frameworks)
 
-    else:   # synthetic (default)
-        gt_arrays = load_gt_arrays(Path(args.h36m_dir), args.subjects, args.max_frames)
+    else:   # synthetic (explicit opt-in smoke test)
+        gt_arrays, meta = load_gt_arrays(Path(args.h36m_dir), args.subjects, args.max_frames)
         if not any(len(v) > 0 for v in gt_arrays.values()):
             print("[X] No GT data loaded. Check that h36m_dir exists and contains .txt files.")
             print(f"    Expected path: {Path(args.h36m_dir).resolve()}")
@@ -489,8 +642,9 @@ def main() -> None:
             sys.exit(1)
         pred_data = synthetic_predictions(gt_arrays, args.frameworks, rng)
 
+    joints   = list(gt_arrays.keys())
     n_frames = len(next(iter(gt_arrays.values())))
-    print(f"[OK] {n_frames:,} frames ready for evaluation\n")
+    print(f"[OK] {n_frames:,} frames × {len(joints)} joints ready for evaluation\n")
 
     # ── Compute metrics ───────────────────────────────────────────────────────
     all_results: list[FrameworkMetrics] = []
@@ -502,6 +656,7 @@ def main() -> None:
             framework=fw,
             pred_arrays=pred_data[fw],
             gt_arrays=gt_arrays,
+            joints=joints,
         )
         all_results.append(result)
         print(f"  [{fw}]  MPJAE={result.mpjae:.2f}°  "
@@ -514,14 +669,82 @@ def main() -> None:
     # ── Console table ─────────────────────────────────────────────────────────
     print_metrics_table(all_results)
 
-    # ── JSON export ───────────────────────────────────────────────────────────
-    json_path = out_dir / "metrics_report.json"
-    with open(json_path, "w") as f:
-        json.dump(metrics_to_dict(all_results), f, indent=2)
-    print(f"[✓] JSON metrics → {json_path}")
+    # ── Statistical significance testing ─────────────────────────────────────
+    print("[→] Statistical significance tests (paired t, Wilcoxon, Cohen's d)...")
+    stats_report = compare_systems(
+        pred_data, gt_arrays, joints=joints,
+        alpha=args.alpha, n_boot=args.n_boot, seed=args.seed,
+    )
+    stats_rows = comparison_report_to_dicts(stats_report)
+    n_sig = sum(1 for r in stats_rows if r["significant"])
+    print(f"[✓] {len(stats_rows)} pairwise tests; {n_sig} significant "
+          f"after Holm-Bonferroni (α={args.alpha})")
+
+    # ── Filter ablation vs ground truth ───────────────────────────────────────
+    ablation_rows: list[dict] = []
+    if not args.skip_ablation:
+        print("[→] Filter ablation study (none / MA / SG / Kalman)...")
+        seq_ids = meta["sequence"] if meta is not None else None
+        ablation_rows = run_filter_ablation(
+            pred_data, gt_arrays, joints=joints, seq_ids=seq_ids,
+        )
+        print(f"[✓] Ablation grid complete ({len(ablation_rows)} rows)")
+
+    # ── LOSO protocol ─────────────────────────────────────────────────────────
+    loso_rows: list[dict] = []
+    if args.protocol == "loso":
+        if meta is None:
+            print("[!] LOSO requires per-frame subject labels — not available "
+                  "in csv mode. Skipping LOSO aggregation.")
+        else:
+            print("[→] Leave-One-Subject-Out evaluation...")
+            loso_rows = loso_evaluation(gt_arrays, pred_data, meta["subject"], joints)
+            print(f"[✓] LOSO complete ({len(loso_rows)} rows)")
+
+    # ── Reproducibility metadata ──────────────────────────────────────────────
+    metadata = build_metadata(
+        dataset="Human3.6M (Ionescu et al., 2014)",
+        subjects=args.subjects,
+        frameworks=args.frameworks,
+        mode=args.mode,
+        protocol=describe_protocol(args.protocol, args.subjects),
+        seed=args.seed,
+        extra={
+            "n_frames": n_frames,
+            "joints": joints,
+            "max_frames": args.max_frames,
+            "alpha": args.alpha,
+            "n_boot": args.n_boot,
+        },
+    )
+
+    # ── Exports ───────────────────────────────────────────────────────────────
+    with open(out_dir / "metrics_report.json", "w") as f:
+        json.dump({"metadata": metadata,
+                   "results": metrics_to_dict(all_results)}, f, indent=2)
+    with open(out_dir / "statistical_tests.json", "w") as f:
+        json.dump(stats_rows, f, indent=2)
+    if ablation_rows:
+        with open(out_dir / "filter_ablation.json", "w") as f:
+            json.dump(ablation_rows, f, indent=2)
+    export_metadata_json(out_dir / "metadata.json", metadata)
+    print(f"[✓] JSON reports → {out_dir}/")
+
+    export_frame_level_csv(out_dir / "frame_level.csv", gt_arrays, pred_data,
+                           meta_columns=meta)
+    xlsx = export_excel(
+        out_dir / "results.xlsx",
+        all_results, gt_arrays, pred_data, metadata,
+        stats_rows=stats_rows,
+        ablation_rows=ablation_rows,
+        meta_columns=meta,
+        extra_sheets={"LOSO": loso_rows} if loso_rows else None,
+    )
+    print(f"[✓] Excel workbook → {xlsx}")
 
     # ── LaTeX table ───────────────────────────────────────────────────────────
-    export_latex_table(all_results, str(out_dir / "paper_table.tex"))
+    export_latex_table(all_results, str(out_dir / "paper_table.tex"),
+                       publication_grade=publication_grade)
 
     # ── Figures ───────────────────────────────────────────────────────────────
     print("\n[→] Generating figures...")
@@ -532,6 +755,8 @@ def main() -> None:
     plot_timeseries_vs_gt(all_results, pred_data, gt_arrays,
                           str(out_dir / "timeseries_vs_gt.png"), n_frames=min(500, n_frames))
 
+    if not publication_grade:
+        print(SYNTHETIC_WARNING)
     print(f"\n[✓] All outputs saved to {out_dir}/")
     print("    Run 'python scripts/compare_frameworks.py' for runtime benchmarks")
     print("    Open outputs/validation/paper_table.tex for the LaTeX table\n")

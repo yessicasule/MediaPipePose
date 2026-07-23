@@ -89,9 +89,9 @@ def load_runners(framework_names: list[str]) -> dict[str, object]:
         try:
             runner = load_estimator(name)
             runners[name] = runner
-            print(f"  [✓] {runner.name} loaded")
+            print(f"  [OK] {runner.name} loaded")
         except Exception as e:
-            print(f"  [✗] {name}: {e}")
+            print(f"  [SKIP] {name}: {e}")
     return runners
 
 
@@ -209,7 +209,7 @@ def run_framework(
     }
 
     if verbose:
-        print(f"    → FPS: {metrics['fps']:.1f}  "
+        print(f"    -> FPS: {metrics['fps']:.1f}  "
               f"det: {metrics['detection_rate']*100:.1f}%  "
               f"P95: {metrics['p95_ms']:.1f}ms")
 
@@ -222,7 +222,7 @@ def print_table(all_metrics: list[dict]) -> None:
     names  = [m["name"] for m in all_metrics]
     col_w  = max(18, max(len(n) + 2 for n in names))
 
-    sep = "─" * (24 + col_w * len(names))
+    sep = "-" * (24 + col_w * len(names))
 
     def hdr(label, vals):
         print(f"  {label:<22}", end="")
@@ -230,9 +230,9 @@ def print_table(all_metrics: list[dict]) -> None:
             print(f"{str(v):>{col_w}}", end="")
         print()
 
-    print("\n" + "═" * (24 + col_w * len(names)))
-    print("  FRAMEWORK COMPARISON — MONOARM")
-    print("═" * (24 + col_w * len(names)))
+    print("\n" + "=" * (24 + col_w * len(names)))
+    print("  FRAMEWORK COMPARISON - MONOARM")
+    print("=" * (24 + col_w * len(names)))
     hdr("Framework",      names)
     hdr(sep[:22],         [sep[:col_w]] * len(names))
     hdr("FPS",            [f"{m['fps']:.1f}"                 for m in all_metrics])
@@ -243,14 +243,14 @@ def print_table(all_metrics: list[dict]) -> None:
 
     for j in JOINTS:
         label = JOINT_LABELS[j].replace(" (°)", "")
-        hdr(f"{label} μ",
+        hdr(f"{label} mean",
             [f"{m['joints'][j]['mean_raw']:+.1f}°"  if m["n_detected"] else "N/A"
              for m in all_metrics])
-        hdr(f"{label} σ",
-            [f"{m['joints'][j]['std_raw']:.2f}°"   if m["n_detected"] else "N/A"
+        hdr(f"{label} std",
+            [f"{m['joints'][j]['std_raw']:.2f} deg"   if m["n_detected"] else "N/A"
              for m in all_metrics])
 
-    print("═" * (24 + col_w * len(names)))
+    print("=" * (24 + col_w * len(names)))
 
     # Overall winners
     valid = [m for m in all_metrics if m["n_detected"] > 0]
@@ -259,10 +259,10 @@ def print_table(all_metrics: list[dict]) -> None:
         best_det   = max(valid, key=lambda m: m["detection_rate"])
         # Use elbow σ as stability proxy (most sensitive to jitter)
         best_stab  = min(valid, key=lambda m: m["joints"]["elbow_flexion"]["std_raw"])
-        print(f"\n  🏆 Fastest:       {best_fps['name']}  ({best_fps['fps']:.1f} FPS)")
-        print(f"  🏆 Most stable:   {best_stab['name']}"
-              f"  (σ={best_stab['joints']['elbow_flexion']['std_raw']:.2f}° elbow)")
-        print(f"  🏆 Best detection:{best_det['name']}"
+        print(f"\n  [BEST] Fastest:       {best_fps['name']}  ({best_fps['fps']:.1f} FPS)")
+        print(f"  [BEST] Most stable:   {best_stab['name']}"
+              f"  (std={best_stab['joints']['elbow_flexion']['std_raw']:.2f} deg elbow)")
+        print(f"  [BEST] Best detection:{best_det['name']}"
               f"  ({best_det['detection_rate']*100:.1f}%)\n")
 
 
@@ -331,7 +331,7 @@ def plot_summary(all_metrics: list[dict], out_path: str) -> None:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close()
-    print(f"[✓] Summary figure saved → {out_path}")
+    print(f"[OK] Summary figure saved -> {out_path}")
 
 
 def plot_timeseries(all_metrics: list[dict], out_path: str) -> None:
@@ -377,7 +377,7 @@ def plot_timeseries(all_metrics: list[dict], out_path: str) -> None:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close()
-    print(f"[✓] Time-series figure saved → {out_path}")
+    print(f"[OK] Time-series figure saved -> {out_path}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -407,14 +407,14 @@ def main() -> None:
     # ── Load frames ──────────────────────────────────────────────────────────
     if args.webcam:
         cap = cv2.VideoCapture(0)
-        print(f"[→] Recording {args.max_frames} frames from webcam...")
+        print(f"[->] Recording {args.max_frames} frames from webcam...")
     else:
         vpath = Path(args.video)
         if not vpath.exists():
-            print(f"[✗] Video not found: {vpath}")
+            print(f"[FAIL] Video not found: {vpath}")
             sys.exit(1)
         cap = cv2.VideoCapture(str(vpath))
-        print(f"[→] Loading from: {vpath}")
+        print(f"[->] Loading from: {vpath}")
 
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or args.max_frames
     step  = max(1, total // args.max_frames)
@@ -432,19 +432,19 @@ def main() -> None:
     cap.release()
 
     if not frames_rgb:
-        print("[✗] No frames loaded.")
+        print("[FAIL] No frames loaded.")
         sys.exit(1)
-    print(f"[✓] {len(frames_rgb)} frames loaded  (source FPS ≈ {video_fps:.0f})")
+    print(f"[OK] {len(frames_rgb)} frames loaded  (source FPS ~ {video_fps:.0f})")
 
     # ── Load runners ─────────────────────────────────────────────────────────
-    print("\n[→] Loading frameworks...")
+    print("\n[->] Loading frameworks...")
     runners = load_runners(args.frameworks)
     if not runners:
-        print("[✗] No frameworks available. Install mediapipe and/or tensorflow.")
+        print("[FAIL] No frameworks available. Install mediapipe and/or tensorflow.")
         sys.exit(1)
 
     # ── Evaluate ─────────────────────────────────────────────────────────────
-    print("\n[→] Evaluating frameworks...")
+    print("\n[->] Evaluating frameworks...")
     all_metrics = []
     for fw_name, runner in runners.items():
         m = run_framework(
@@ -473,7 +473,7 @@ def main() -> None:
     report_json = out_dir / "comparison_report.json"
     with open(report_json, "w") as f:
         json.dump(json_metrics, f, indent=2)
-    print(f"[✓] JSON report → {report_json}")
+    print(f"[OK] JSON report -> {report_json}")
 
     # Figures
     plot_summary(all_metrics, str(out_dir / "comparison_report.png"))

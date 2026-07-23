@@ -124,18 +124,21 @@ class PoseNetRunner(PoseEstimator):
 
     def __init__(self, model_path: str | Path | None = None) -> None:
         try:
-            from tflite_runtime.interpreter import Interpreter
+            from ai_edge_litert.interpreter import Interpreter
             _Interpreter = Interpreter
         except ImportError:
             try:
-                import tensorflow as tf
-                _Interpreter = tf.lite.Interpreter
+                from tflite_runtime.interpreter import Interpreter
+                _Interpreter = Interpreter
             except ImportError:
-                raise ImportError(
-                    "PoseNet requires either 'tflite-runtime' or 'tensorflow' to be installed.\n"
-                    "Install with: pip install tflite-runtime\n"
-                    "Or:           pip install tensorflow"
-                )
+                try:
+                    import tensorflow as tf
+                    _Interpreter = tf.lite.Interpreter
+                except ImportError:
+                    raise ImportError(
+                        "PoseNet requires 'ai-edge-litert', 'tflite-runtime', or 'tensorflow'.\n"
+                        "Install with: pip install ai-edge-litert"
+                    )
 
         path = Path(model_path) if model_path else _ensure_posenet_model()
         self._interpreter = _Interpreter(model_path=str(path))

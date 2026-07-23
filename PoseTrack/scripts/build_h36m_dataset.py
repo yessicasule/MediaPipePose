@@ -43,6 +43,10 @@ import argparse
 import sys
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import numpy as np
 import pandas as pd
 from src.evaluation.h36m_loader import parse_h36m_file, GTAngles

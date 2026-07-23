@@ -27,7 +27,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .angle_solver import ArmAngles
+from .angle_solver import ArmAngles, BilateralArmAngles
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +117,96 @@ class CsvAngleLogger:
             self._writer = None
 
 
+_SIDES        = ["right", "left"]
+_ANGLE_FIELDS = ["shoulder_flexion", "shoulder_abduction", "shoulder_rotation", "elbow_flexion"]
+
+
+class BilateralCsvAngleLogger:
+    """
+    Timestamped CSV logger for bilateral (left + right arm) sessions.
+
+    One row per frame with side-prefixed angle columns. A side that was
+    not tracked in a given frame is logged as empty cells with its
+    ``<side>_tracked`` flag set to 0, so downstream analysis can
+    distinguish occlusion from a genuine 0-degree reading.
+    """
+
+    SIDES  = _SIDES
+    ANGLES = _ANGLE_FIELDS
+
+    COLUMNS = (
+        ["timestamp_s", "frame"]
+        + [f"{s}_{a}" for s in _SIDES for a in _ANGLE_FIELDS]
+        + [f"{s}_rotation_reliable" for s in _SIDES]
+        + [f"{s}_tracked" for s in _SIDES]
+        + ["filter_type", "calibrated"]
+    )
+
+    def __init__(
+        self,
+        output_dir:    str | Path = "outputs/logs",
+        filter_type:   str = "kalman",
+        session_label: str = "",
+    ) -> None:
+        self._dir        = Path(output_dir)
+        self._filter     = filter_type
+        self._label      = session_label
+        self._file       = None
+        self._writer     = None
+        self._start_time = 0.0
+        self._frame      = 0
+        self._calibrated = False
+
+    def start(self, calibrated: bool = False) -> Path:
+        """Open the CSV file and write the header row."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        ts    = time.strftime("%Y%m%d_%H%M%S")
+        label = f"_{self._label}" if self._label else ""
+        path  = self._dir / f"angles_bilateral_{ts}{label}.csv"
+
+        self._file       = open(path, "w", newline="")
+        self._writer     = csv.DictWriter(self._file, fieldnames=self.COLUMNS)
+        self._writer.writeheader()
+        self._start_time = time.perf_counter()
+        self._frame      = 0
+        self._calibrated = calibrated
+        return path
+
+    def log(self, bilateral: BilateralArmAngles) -> None:
+        """Write one row for the current frame."""
+        if self._writer is None:
+            raise RuntimeError("Call start() before log().")
+
+        row = {
+            "timestamp_s": round(time.perf_counter() - self._start_time, 4),
+            "frame":       self._frame,
+            "filter_type": self._filter,
+            "calibrated":  int(self._calibrated),
+        }
+        for side in self.SIDES:
+            angles: ArmAngles | None = getattr(bilateral, side)
+            row[f"{side}_tracked"] = int(angles is not None)
+            if angles is None:
+                for a in self.ANGLES:
+                    row[f"{side}_{a}"] = ""
+                row[f"{side}_rotation_reliable"] = ""
+            else:
+                for a in self.ANGLES:
+                    row[f"{side}_{a}"] = round(getattr(angles, a), 2)
+                row[f"{side}_rotation_reliable"] = int(angles.rotation_reliable)
+
+        self._writer.writerow(row)
+        self._frame += 1
+
+    def stop(self) -> None:
+        """Flush and close the log file."""
+        if self._file is not None:
+            self._file.flush()
+            self._file.close()
+            self._file   = None
+            self._writer = None
+
+
 # ---------------------------------------------------------------------------
 # Real-time rolling plot (OpenCV-based, no matplotlib dependency)
 # ---------------------------------------------------------------------------
@@ -141,7 +231,9 @@ class RollingAnglePlot:
         Y-axis range (degrees) for the elbow panel.
     """
 
-    _LABELS = ["Flex (°)", "Abd (°)", "Rot (°)", "Elbow (°)"]
+    # ASCII only — cv2.putText uses Hershey fonts which render non-ASCII
+    # characters (e.g. the degree symbol) as "??".
+    _LABELS = ["Flex (deg)", "Abd (deg)", "Rot (deg)", "Elbow (deg)"]
     _COLORS = [
         (100, 220, 100),   # green  — flexion
         (100, 160, 255),   # blue   — abduction

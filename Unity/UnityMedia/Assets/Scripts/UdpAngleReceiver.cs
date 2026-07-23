@@ -5,8 +5,10 @@
 // Packet Format
 // -------------
 //   S,<shoulder_flex>,<shoulder_abd>,<shoulder_rot>,<elbow_flex>\n
+//       Single-arm pose from MediaPipe (calibrated + filtered on the
+//       Python side). Drives the single humanoid avatar in the scene.
 //
-//   All values are in degrees. The 'S' prefix denotes a single-arm pose.
+//   All values are in degrees.
 //
 // Threading Model
 // ---------------
@@ -125,6 +127,8 @@ namespace MonoArm
                 if (!_pendingReady) return;
                 LatestAngles   = _pending;
                 _pendingReady  = false;
+                if (!HasData)
+                    Debug.Log($"[UdpAngleReceiver] First packet received on port {listenPort} — avatar is live.");
                 HasData        = true;
                 PacketCount++;
                 _lastPacketTime = Time.unscaledTime;
@@ -176,15 +180,17 @@ namespace MonoArm
                     string line = Encoding.UTF8.GetString(data).Trim();
 
                     if (string.IsNullOrEmpty(line)) continue;
-                    if (!line.StartsWith("S,"))       continue;
 
-                    // Parse: S,flex,abd,rot,elbow
-                    if (!TryParsePacket(line.Substring(2), out ArmAngles angles)) continue;
-
-                    lock (_lock)
+                    if (line.StartsWith("S,"))
                     {
-                        _pending      = angles;
-                        _pendingReady = true;
+                        // Parse: S,flex,abd,rot,elbow
+                        if (!TryParsePacket(line.Substring(2), out ArmAngles angles)) continue;
+
+                        lock (_lock)
+                        {
+                            _pending      = angles;
+                            _pendingReady = true;
+                        }
                     }
                 }
                 catch (SocketException)  { /* socket closed — exit loop */ break; }
