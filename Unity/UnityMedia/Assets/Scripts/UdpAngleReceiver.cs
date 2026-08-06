@@ -5,8 +5,13 @@
 // Packet Format
 // -------------
 //   S,<shoulder_flex>,<shoulder_abd>,<shoulder_rot>,<elbow_flex>\n
-//       Single-arm pose from MediaPipe (calibrated + filtered on the
-//       Python side). Drives the single humanoid avatar in the scene.
+//       Single-arm (right) pose from MediaPipe (calibrated + filtered on
+//       the Python side). Drives the single humanoid avatar in the scene.
+//
+//   B,<r_flex>,<r_abd>,<r_rot>,<r_elbow>,<l_flex>,<l_abd>,<l_rot>,<l_elbow>\n
+//       Bilateral pose (right side first). LatestAngles is kept mirroring
+//       the right side for backward compatibility with single-avatar
+//       scenes; LatestBilateralAngles carries both sides.
 //
 //   All values are in degrees.
 //
@@ -59,6 +64,15 @@ namespace MonoArm
             $"Rot:{shoulderRotation:F1}° Elb:{elbowFlexion:F1}°";
     }
 
+    /// <summary>Both arms' angles from one bilateral ('B,') packet.</summary>
+    public struct BilateralArmAngles
+    {
+        public ArmAngles right;
+        public ArmAngles left;
+
+        public override string ToString() => $"R[{right}] L[{left}]";
+    }
+
     /// <summary>
     /// Threaded UDP receiver that delivers ArmAngles to the Unity main thread.
     /// Attach to any persistent GameObject (e.g. a PoseManager empty object).
@@ -71,8 +85,18 @@ namespace MonoArm
         public int listenPort = 9000;
 
         // ── Public state ────────────────────────────────────────────────────
-        /// <summary>Latest validated angles, updated each Unity frame.</summary>
+        /// <summary>
+        /// Latest validated angles, updated each Unity frame. For a bilateral
+        /// ('B,') packet this mirrors the right side, for backward
+        /// compatibility with single-avatar scenes.
+        /// </summary>
         public ArmAngles LatestAngles { get; private set; }
+
+        /// <summary>Latest bilateral angles (both arms), updated each Unity frame.</summary>
+        public BilateralArmAngles LatestBilateralAngles { get; private set; }
+
+        /// <summary>True if the most recently received packet was a bilateral ('B,') packet.</summary>
+        public bool IsBilateral { get; private set; }
 
         /// <summary>True once the first valid packet has been received.</summary>
         public bool HasData { get; private set; }
@@ -90,6 +114,8 @@ namespace MonoArm
 
         readonly object _lock = new();
         ArmAngles _pending;
+        BilateralArmAngles _pendingBilateral;
+        bool      _pendingIsBilateral;
         bool      _pendingReady;
         float     _lastPacketTime;
 
@@ -125,7 +151,10 @@ namespace MonoArm
             lock (_lock)
             {
                 if (!_pendingReady) return;
-                LatestAngles   = _pending;
+                LatestAngles           = _pending;
+                IsBilateral            = _pendingIsBilateral;
+                if (_pendingIsBilateral)
+                    LatestBilateralAngles = _pendingBilateral;
                 _pendingReady  = false;
                 if (!HasData)
                     Debug.Log($"[UdpAngleReceiver] First packet received on port {listenPort} — avatar is live.");
@@ -188,8 +217,22 @@ namespace MonoArm
 
                         lock (_lock)
                         {
-                            _pending      = angles;
-                            _pendingReady = true;
+                            _pending            = angles;
+                            _pendingIsBilateral = false;
+                            _pendingReady       = true;
+                        }
+                    }
+                    else if (line.StartsWith("B,"))
+                    {
+                        // Parse: B,r_flex,r_abd,r_rot,r_elbow,l_flex,l_abd,l_rot,l_elbow
+                        if (!TryParseBilateralPacket(line.Substring(2), out BilateralArmAngles bilateral)) continue;
+
+                        lock (_lock)
+                        {
+                            _pending            = bilateral.right;
+                            _pendingBilateral   = bilateral;
+                            _pendingIsBilateral = true;
+                            _pendingReady       = true;
                         }
                     }
                 }
@@ -225,6 +268,19 @@ namespace MonoArm
                 shoulderRotation  = rot,
                 elbowFlexion      = elbow,
             };
+            return true;
+        }
+
+        static bool TryParseBilateralPacket(string body, out BilateralArmAngles a)
+        {
+            a = default;
+            var parts = body.Split(',');
+            if (parts.Length < 8) return false;
+
+            if (!TryParsePacket(string.Join(",", parts, 0, 4), out ArmAngles right)) return false;
+            if (!TryParsePacket(string.Join(",", parts, 4, 4), out ArmAngles left))  return false;
+
+            a = new BilateralArmAngles { right = right, left = left };
             return true;
         }
     }

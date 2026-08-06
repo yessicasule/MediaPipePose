@@ -51,6 +51,8 @@ from typing import Callable
 import numpy as np
 from scipy import stats as _st
 
+from .metrics import circular_diff
+
 
 # ── Data types ───────────────────────────────────────────────────────────────
 
@@ -228,8 +230,11 @@ def compare_systems(
         for sys_a, sys_b in combinations(systems, 2):
             if joint not in pred_data[sys_a] or joint not in pred_data[sys_b]:
                 continue
-            err_a = np.abs(pred_data[sys_a][joint] - gt)
-            err_b = np.abs(pred_data[sys_b][joint] - gt)
+            # circular_diff (not naive subtraction) so wraparound-affected
+            # frames don't distort the paired comparison the same way they
+            # would distort a naive MAE (see metrics.circular_diff).
+            err_a = np.abs(circular_diff(pred_data[sys_a][joint], gt))
+            err_b = np.abs(circular_diff(pred_data[sys_b][joint], gt))
 
             t, t_p = paired_t_test(err_a, err_b)
             w, w_p = wilcoxon_test(err_a, err_b)

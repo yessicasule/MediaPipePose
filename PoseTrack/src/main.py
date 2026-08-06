@@ -33,27 +33,27 @@ import numpy as np
 
 from config.config import Config, ANGLES_DIR
 from src.pose.mediapipe_runner import MediaPipeRunner
-from src.processing.angle_solver import compute_arm_angles, ArmAngles
-from src.processing.angle_filter import AngleFilterBank
+from src.processing.angle_solver import compute_bilateral_angles, ArmAngles, BilateralArmAngles
+from src.processing.angle_filter import BilateralFilterBank
 from src.streaming.udp_streamer import UdpAngleSender
 
 
 def draw_debug_info(
     frame:   np.ndarray,
-    raw:     ArmAngles | None,
-    filt:    ArmAngles | None,
+    raw:     BilateralArmAngles | None,
+    filt:    BilateralArmAngles | None,
     fps:     float,
     port:    int,
 ) -> None:
-    """Draw dashboard HUD and values directly onto the camera display frame."""
+    """Draw dashboard HUD and values (both arms) directly onto the camera display frame."""
     # Semi-transparent overlay box for dashboard
     overlay = frame.copy()
-    cv2.rectangle(overlay, (10, 10), (320, 210), (26, 26, 38), -1)
+    cv2.rectangle(overlay, (10, 10), (360, 300), (26, 26, 38), -1)
     cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
     # Info text
-    cv2.putText(frame, "MonoArm Live Controller", (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 220, 100), 2)
+    cv2.putText(frame, "MonoArm Live Controller (bilateral)", (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 220, 100), 2)
     cv2.putText(frame, f"FPS: {fps:.1f} | Port: {port}", (20, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
@@ -65,19 +65,28 @@ def draw_debug_info(
     ]
 
     y_offset = 80
-    for label, getter in joints:
-        raw_val = getter(raw) if raw else 0.0
-        filt_val = getter(filt) if filt else 0.0
-        
-        cv2.putText(frame, f"{label}:", (20, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1)
-        cv2.putText(frame, f"{filt_val:6.1f} deg (raw: {raw_val:6.1f})", (140, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 200, 255), 1)
-        y_offset += 25
+    for side_label, raw_side, filt_side in (
+        ("RIGHT", raw.right if raw else None, filt.right if filt else None),
+        ("LEFT",  raw.left  if raw else None, filt.left  if filt else None),
+    ):
+        cv2.putText(frame, side_label, (20, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 255), 1)
+        y_offset += 22
+        for label, getter in joints:
+            raw_val = getter(raw_side) if raw_side else 0.0
+            filt_val = getter(filt_side) if filt_side else 0.0
+
+            cv2.putText(frame, f"{label}:", (20, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1)
+            cv2.putText(frame, f"{filt_val:6.1f} deg (raw: {raw_val:6.1f})", (140, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 200, 255), 1)
+            y_offset += 25
+        y_offset += 8
 
     # Simple connection status light
-    color = (100, 255, 100) if raw else (100, 100, 255)
-    status_txt = "STREAMING ACTIVE" if raw else "NO POSE DETECTED"
+    detected = bool(raw and (raw.right or raw.left))
+    color = (100, 255, 100) if detected else (100, 100, 255)
+    status_txt = "STREAMING ACTIVE" if detected else "NO POSE DETECTED"
     cv2.circle(frame, (25, y_offset + 10), 6, color, -1)
     cv2.putText(frame, status_txt, (40, y_offset + 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
@@ -110,8 +119,9 @@ def main() -> None:
     )
     
     # Choose 30.0 Hz target loop rate for matching the Unity avatar update rate
-    filt_bank = AngleFilterBank(filter_type=args.filter, stream_hz=Config.STREAM_HZ)
-    udp_sender = UdpAngleSender(host=Config.UDP_IP, port=Config.UDP_PORT, hz=Config.STREAM_HZ)
+    filt_bank = BilateralFilterBank(filter_type=args.filter, stream_hz=Config.STREAM_HZ)
+    udp_sender = UdpAngleSender(host=Config.UDP_IP, port=Config.UDP_PORT, hz=Config.STREAM_HZ,
+                                 bilateral=True)
     
     cap = cv2.VideoCapture(args.camera, cv2.CAP_MSMF)
     if not cap.isOpened():
@@ -135,10 +145,14 @@ def main() -> None:
         # Header row
         csv_writer.writerow([
             "timestamp", "elapsed_s", "pose_detected",
-            "shoulder_flexion_raw", "shoulder_flexion_filt",
-            "shoulder_abduction_raw", "shoulder_abduction_filt",
-            "shoulder_rotation_raw", "shoulder_rotation_filt",
-            "elbow_flexion_raw", "elbow_flexion_filt",
+            "right_shoulder_flexion_raw", "right_shoulder_flexion_filt",
+            "right_shoulder_abduction_raw", "right_shoulder_abduction_filt",
+            "right_shoulder_rotation_raw", "right_shoulder_rotation_filt",
+            "right_elbow_flexion_raw", "right_elbow_flexion_filt",
+            "left_shoulder_flexion_raw", "left_shoulder_flexion_filt",
+            "left_shoulder_abduction_raw", "left_shoulder_abduction_filt",
+            "left_shoulder_rotation_raw", "left_shoulder_rotation_filt",
+            "left_elbow_flexion_raw", "left_elbow_flexion_filt",
         ])
         print(f"[OK] Logging session data to: {log_path}")
 
@@ -179,32 +193,37 @@ def main() -> None:
             filt_angles = None
 
             if landmarks is not None:
-                # Solve joint angles
-                raw_angles = compute_arm_angles(landmarks)
-                
+                # Solve joint angles for both arms
+                raw_angles = compute_bilateral_angles(landmarks)
+
                 if raw_angles is not None:
-                    # Apply filter
+                    # Apply filter (per side, per DOF)
                     filt_angles = filt_bank.update(raw_angles)
-                    
+
                     # Update UDP payload
-                    udp_sender.update(filt_angles)
+                    udp_sender.update_bilateral(filt_angles)
 
             # ── Session Logging ───────────────────────────────────────────────────
             if csv_writer and log_file:
                 elapsed = time.perf_counter() - start_time
-                if raw_angles and filt_angles:
-                    csv_writer.writerow([
-                        time.time(), f"{elapsed:.3f}", 1,
-                        f"{raw_angles.shoulder_flexion:.3f}", f"{filt_angles.shoulder_flexion:.3f}",
-                        f"{raw_angles.shoulder_abduction:.3f}", f"{filt_angles.shoulder_abduction:.3f}",
-                        f"{raw_angles.shoulder_rotation:.3f}", f"{filt_angles.shoulder_rotation:.3f}",
-                        f"{raw_angles.elbow_flexion:.3f}", f"{filt_angles.elbow_flexion:.3f}",
-                    ])
+                pose_detected = int(bool(raw_angles and (raw_angles.right or raw_angles.left)))
+                if pose_detected:
+                    def _fields(raw_side: ArmAngles | None, filt_side: ArmAngles | None) -> list:
+                        if raw_side is None or filt_side is None:
+                            return [0.0] * 8
+                        return [
+                            f"{raw_side.shoulder_flexion:.3f}", f"{filt_side.shoulder_flexion:.3f}",
+                            f"{raw_side.shoulder_abduction:.3f}", f"{filt_side.shoulder_abduction:.3f}",
+                            f"{raw_side.shoulder_rotation:.3f}", f"{filt_side.shoulder_rotation:.3f}",
+                            f"{raw_side.elbow_flexion:.3f}", f"{filt_side.elbow_flexion:.3f}",
+                        ]
+                    csv_writer.writerow(
+                        [time.time(), f"{elapsed:.3f}", 1]
+                        + _fields(raw_angles.right, filt_angles.right)
+                        + _fields(raw_angles.left,  filt_angles.left)
+                    )
                 else:
-                    csv_writer.writerow([
-                        time.time(), f"{elapsed:.3f}", 0,
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-                    ])
+                    csv_writer.writerow([time.time(), f"{elapsed:.3f}", 0] + [0.0] * 16)
 
             # ── Video Overlay Display ─────────────────────────────────────────────
             if not args.no_viz:
@@ -215,13 +234,16 @@ def main() -> None:
 
             # Print quick dashboard in console (carriage return to overwrite line)
             if frame_count % 15 == 0:
-                if filt_angles:
+                r = filt_angles.right if filt_angles else None
+                l = filt_angles.left if filt_angles else None
+                if r or l:
+                    def _fmt(a: ArmAngles | None) -> str:
+                        if a is None:
+                            return "no track"
+                        return (f"Flex:{a.shoulder_flexion:5.1f}° Abd:{a.shoulder_abduction:5.1f}° "
+                                f"Rot:{a.shoulder_rotation:5.1f}° Elb:{a.elbow_flexion:5.1f}°")
                     sys.stdout.write(
-                        f"\r[OK] Flex: {filt_angles.shoulder_flexion:5.1f}° | "
-                        f"Abd: {filt_angles.shoulder_abduction:5.1f}° | "
-                        f"Rot: {filt_angles.shoulder_rotation:5.1f}° | "
-                        f"Elb: {filt_angles.elbow_flexion:5.1f}° | "
-                        f"FPS: {fps:4.1f}"
+                        f"\r[OK] R[{_fmt(r)}] | L[{_fmt(l)}] | FPS: {fps:4.1f}"
                     )
                 else:
                     sys.stdout.write("\r[WAIT] Searching for pose...")

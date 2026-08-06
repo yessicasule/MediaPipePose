@@ -84,10 +84,29 @@ class FrameworkMetrics:
 
 # ── Per-joint computation ────────────────────────────────────────────────────
 
+def circular_diff(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    """
+    Signed angular difference on a ±180° circle: shortest-path (pred − gt),
+    wrapped into [-180, 180).
+
+    Naive subtraction overstates error whenever the true difference crosses
+    the ±180° boundary (e.g. pred=179°, gt=-179° is actually 2° apart, not
+    358°). This is a no-op away from the boundary, so applying it
+    unconditionally to every DOF is always at least as correct as naive
+    differencing. See the paper's "Metric corrections identified but not
+    yet upstreamed" discussion — this was previously a post-hoc, flexion-only
+    correction (docs/paper/analysis/sync_corrected_evaluation.py); it is now
+    the default for all DOF.
+    """
+    d = pred - gt
+    return (d + 180.0) % 360.0 - 180.0
+
+
 def compute_joint_metrics(
     joint:   str,
     pred:    np.ndarray,
     gt:      np.ndarray,
+    reliable_mask: np.ndarray | None = None,
 ) -> JointMetrics:
     """
     Compute all metrics for one joint given arrays of predicted and GT angles.
@@ -100,6 +119,13 @@ def compute_joint_metrics(
         Predicted angles in degrees.
     gt : np.ndarray, shape (N,)
         Ground-truth angles in degrees.
+    reliable_mask : np.ndarray of bool, shape (N,), optional
+        When given, frames where this is False are excluded in addition to
+        NaN frames. Intended for the shoulder-rotation DOF, whose forearm-
+        proxy estimate is only geometrically meaningful above a minimum
+        elbow-flexion threshold (see angle_solver.ROT_RELIABLE_THRESHOLD) —
+        without this, unconditional MAE mixes real errors with noise from
+        frames where the estimate was never meant to be trusted.
 
     Returns
     -------
@@ -108,17 +134,22 @@ def compute_joint_metrics(
     assert len(pred) == len(gt), f"Length mismatch: pred={len(pred)}, gt={len(gt)}"
 
     # Exclude frames where either signal is NaN (untracked frame or
-    # missing GT) — metrics must come only from genuinely observed pairs.
+    # missing GT), and — for DOF where it applies — frames flagged
+    # unreliable — metrics must come only from genuinely observed,
+    # geometrically meaningful pairs.
     valid = ~(np.isnan(pred) | np.isnan(gt))
-    pred  = np.asarray(pred, dtype=np.float64)[valid]
-    gt    = np.asarray(gt,   dtype=np.float64)[valid]
+    if reliable_mask is not None:
+        valid = valid & np.asarray(reliable_mask, dtype=bool)
+    pred_valid = np.asarray(pred, dtype=np.float64)[valid]
+    gt_valid   = np.asarray(gt,   dtype=np.float64)[valid]
+    pred, gt   = pred_valid, gt_valid
 
     n   = len(pred)
     if n == 0:
         nan = float("nan")
         return JointMetrics(joint=joint, n=0, mae=nan, rmse=nan, bias=nan,
                             r=nan, pck_5=nan, pck_10=nan, pck_15=nan, jitter=nan)
-    err = pred - gt
+    err = circular_diff(pred, gt)
 
     mae  = float(np.mean(np.abs(err)))
     rmse = float(np.sqrt(np.mean(err ** 2)))
@@ -161,11 +192,20 @@ def compute_joint_metrics(
 
 # ── Full framework evaluation ─────────────────────────────────────────────────
 
+# DOF whose estimate is only geometrically meaningful when the GT-reported
+# reliability gate (elbow flexion above threshold) is satisfied; see
+# angle_solver.ROT_RELIABLE_THRESHOLD and compute_joint_metrics. Right and
+# left sides gate independently (each arm's own elbow flexion), so masks
+# are supplied per joint rather than as one shared array.
+ROTATION_JOINTS = {"shoulder_rotation", "left_shoulder_rotation"}
+
+
 def evaluate_framework(
     framework: str,
     pred_arrays: dict[str, np.ndarray],   # joint → predicted angles
     gt_arrays:   dict[str, np.ndarray],   # joint → GT angles
     joints: list[str] | None = None,
+    reliable_masks: dict[str, np.ndarray] | None = None,
 ) -> FrameworkMetrics:
     """
     Evaluate one framework against ground truth across all joints.
@@ -180,6 +220,12 @@ def evaluate_framework(
         Ground-truth angle arrays keyed by joint name.
     joints : list[str], optional
         Which joints to evaluate. Defaults to JOINTS.
+    reliable_masks : dict[str, np.ndarray of bool], optional
+        Per-joint reliability mask, keyed by joint name — only joints
+        present in this dict are masked (typically just
+        "shoulder_rotation" / "left_shoulder_rotation", each gated by its
+        own side's GT elbow flexion; see ROT_RELIABLE_THRESHOLD). Absent
+        joints are scored on every non-NaN frame, unchanged from before.
 
     Returns
     -------
@@ -194,7 +240,8 @@ def evaluate_framework(
     for j in joints:
         if j not in pred_arrays or j not in gt_arrays:
             continue
-        jm = compute_joint_metrics(j, pred_arrays[j], gt_arrays[j])
+        mask = reliable_masks.get(j) if reliable_masks else None
+        jm = compute_joint_metrics(j, pred_arrays[j], gt_arrays[j], reliable_mask=mask)
         result.joints[j] = jm
         maes.append(jm.mae)
         rmses.append(jm.rmse)

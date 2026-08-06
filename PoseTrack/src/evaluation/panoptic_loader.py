@@ -3,10 +3,13 @@ panoptic_loader.py — CMU Panoptic Studio Ground-Truth Angle Extractor
 ========================================================================
 
 Parses CMU Panoptic Studio "coco19" 3D body keypoint files and computes
-ground-truth right-arm joint angles using the SAME anatomical angle
-convention as the MonoArm vision pipeline (coordinate_frame.py +
+ground-truth BILATERAL (both arms) joint angles using the SAME anatomical
+angle convention as the MonoArm vision pipeline (coordinate_frame.py +
 angle_solver.py) and the same construction used for Human3.6M in
-h36m_loader.py, so results are directly comparable.
+h36m_loader.py, so results are directly comparable. Left-arm angles reuse
+h36m_loader._compute_side_gt(mirror=True) — the identical sagittal-plane
+reflection angle_solver.compute_bilateral_angles() applies on the
+prediction side.
 
 Used as a real (non-registration-gated) substitute for Human3.6M when
 Human3.6M account approval is unavailable. See:
@@ -39,20 +42,20 @@ absolute world-axis convention.
 from __future__ import annotations
 
 import json
-import math
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
 
-from .h36m_loader import GTAngles, _normalize, ROT_RELIABLE_THRESHOLD
+from .h36m_loader import GTAngles, _normalize, _compute_side_gt
 
 # --------------------------------------------------------------------------
-# Panoptic coco19 right-arm joint indices
+# Panoptic coco19 bilateral-arm joint indices
 # --------------------------------------------------------------------------
 COCO19_NECK        = 0
 COCO19_LSHOULDER   = 3
+COCO19_LELBOW      = 4
+COCO19_LWRIST      = 5
 COCO19_LHIP        = 6
 COCO19_RSHOULDER   = 9
 COCO19_RELBOW      = 10
@@ -62,12 +65,17 @@ COCO19_RHIP        = 12
 MIN_JOINT_CONFIDENCE = 0.1
 
 
-def _compute_gt_angles_coco19(joints: np.ndarray, frame_idx: int = 0) -> GTAngles | None:
+def _compute_gt_angles_coco19(
+    joints: np.ndarray, frame_idx: int = 0, left_ok: bool = True,
+) -> GTAngles | None:
     """
-    Compute anatomically consistent right-arm angles from a coco19 skeleton.
+    Compute anatomically consistent bilateral arm angles from a coco19 skeleton.
 
-    Mirrors h36m_loader._compute_gt_angles() exactly, just re-indexed for
-    the Panoptic joint layout.
+    Builds the torso frame as in h36m_loader._compute_gt_angles() (just
+    re-indexed for the Panoptic joint layout), then delegates the per-side
+    angle math to h36m_loader._compute_side_gt() for both arms — the right
+    arm is required (returns None if degenerate); the left arm is optional
+    and simply left at its NaN default (via GTAngles) if degenerate.
 
     Parameters
     ----------
@@ -79,6 +87,8 @@ def _compute_gt_angles_coco19(joints: np.ndarray, frame_idx: int = 0) -> GTAngle
         r_elbow    = joints[COCO19_RELBOW]
         r_wrist    = joints[COCO19_RWRIST]
         l_shoulder = joints[COCO19_LSHOULDER]
+        l_elbow    = joints[COCO19_LELBOW]
+        l_wrist    = joints[COCO19_LWRIST]
         r_hip      = joints[COCO19_RHIP]
         l_hip      = joints[COCO19_LHIP]
     except IndexError:
@@ -99,53 +109,31 @@ def _compute_gt_angles_coco19(joints: np.ndarray, frame_idx: int = 0) -> GTAngle
 
     R = np.column_stack([x_axis, y_cand, z_axis])
 
-    v_upper_arm_world = r_elbow - r_shoulder
-    v_forearm_world   = r_wrist - r_elbow
-
-    if np.linalg.norm(v_upper_arm_world) < 1e-9:
+    right = _compute_side_gt(R, r_shoulder, r_elbow, r_wrist, mirror=False)
+    if right is None:
         return None
+    left = _compute_side_gt(R, l_shoulder, l_elbow, l_wrist, mirror=True) if left_ok else None
 
-    v_ua_torso = R.T @ v_upper_arm_world
-    v_fa_torso = R.T @ v_forearm_world
+    r_flex, r_abd, r_rot, r_elb, r_rel = right
 
-    u_ua = _normalize(v_ua_torso)
-    vx, vy, vz = u_ua[0], u_ua[1], u_ua[2]
-
-    flexion_deg = math.degrees(math.atan2(-vz, -vy))
-
-    vx_clamped    = float(np.clip(-vx, -1.0, 1.0))
-    abduction_deg = math.degrees(math.asin(vx_clamped))
-
-    u_fa = _normalize(v_fa_torso) if np.linalg.norm(v_fa_torso) > 1e-9 else v_fa_torso
-    cos_ang   = float(np.clip(np.dot(u_ua, u_fa), -1.0, 1.0))
-    elbow_deg = max(0.0, math.degrees(math.acos(cos_ang)))
-
-    rotation_deg = 0.0
-    rot_reliable = elbow_deg >= ROT_RELIABLE_THRESHOLD
-
-    if rot_reliable and np.linalg.norm(v_fa_torso) > 1e-9:
-        f_perp = u_fa - np.dot(u_fa, u_ua) * u_ua
-        f_norm = np.linalg.norm(f_perp)
-        if f_norm > 1e-9:
-            f_perp /= f_norm
-            ref = np.array([1.0, 0.0, 0.0])
-            if abs(np.dot(u_ua, ref)) > 0.9:
-                ref = np.array([0.0, 0.0, 1.0])
-            e1 = _normalize(np.cross(u_ua, ref))
-            e2 = np.cross(u_ua, e1)
-            rotation_deg = math.degrees(math.atan2(
-                float(np.dot(f_perp, e1)),
-                float(np.dot(f_perp, e2)),
-            ))
-
-    return GTAngles(
-        shoulder_flexion   = round(flexion_deg,   4),
-        shoulder_abduction = round(abduction_deg, 4),
-        shoulder_rotation  = round(rotation_deg,  4),
-        elbow_flexion      = round(elbow_deg,      4),
-        rotation_reliable  = rot_reliable,
+    gt = GTAngles(
+        shoulder_flexion   = round(r_flex, 4),
+        shoulder_abduction = round(r_abd,  4),
+        shoulder_rotation  = round(r_rot,  4),
+        elbow_flexion      = round(r_elb,  4),
+        rotation_reliable  = r_rel,
         frame_idx          = frame_idx,
     )
+
+    if left is not None:
+        l_flex, l_abd, l_rot, l_elb, l_rel = left
+        gt.left_shoulder_flexion   = round(l_flex, 4)
+        gt.left_shoulder_abduction = round(l_abd,  4)
+        gt.left_shoulder_rotation  = round(l_rot,  4)
+        gt.left_elbow_flexion      = round(l_elb,  4)
+        gt.left_rotation_reliable  = l_rel
+
+    return gt
 
 
 def parse_panoptic_frame(json_path: Path, body_id: int | None = None) -> GTAngles | None:
@@ -175,13 +163,20 @@ def parse_panoptic_frame(json_path: Path, body_id: int | None = None) -> GTAngle
     arr = np.array(flat, dtype=np.float64).reshape(19, 4)
     joints, confidence = arr[:, :3], arr[:, 3]
 
+    # Right arm + torso landmarks are required (frame dropped if unreliable);
+    # the left arm is optional — low left-side confidence degrades only the
+    # left-arm fields (left at NaN) rather than dropping an otherwise-good
+    # right-arm frame.
     needed = [COCO19_RSHOULDER, COCO19_RELBOW, COCO19_RWRIST,
               COCO19_LSHOULDER, COCO19_RHIP, COCO19_LHIP]
     if any(confidence[j] < MIN_JOINT_CONFIDENCE for j in needed):
         return None
 
+    left_ok = (confidence[COCO19_LELBOW] >= MIN_JOINT_CONFIDENCE and
+               confidence[COCO19_LWRIST] >= MIN_JOINT_CONFIDENCE)
+
     frame_idx = int(json_path.stem.split("_")[-1])
-    return _compute_gt_angles_coco19(joints, frame_idx=frame_idx)
+    return _compute_gt_angles_coco19(joints, frame_idx=frame_idx, left_ok=left_ok)
 
 
 def iter_panoptic_sequence(

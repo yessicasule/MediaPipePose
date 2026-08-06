@@ -49,20 +49,33 @@ Human3.6M is registration-gated and was unavailable during this study, we
 validate the framework instead on a real, non-simulated sequence from the
 publicly distributed CMU Panoptic Studio dataset, running the actual pose
 estimators on real video and scoring them against real 3D motion-capture
-ground truth end to end. On this pilot sequence (101 frames, single
-subject, single camera), MoveNet-Lightning achieved a lower mean
-per-joint angle error (29.3\textdegree\ vs.\ 46.6\textdegree) and higher
-correlation with ground truth ($r=0.760$ vs.\ $r=0.587$) than MediaPipe.
-In diagnosing these results we identify two evaluation pitfalls that
-would otherwise bias any framework comparison: (i) naive degree-wise
-differencing overstates flexion error by 17--25\% whenever the true
+ground truth end to end. A first pass of this validation assumed video
+frame $i$ and ground-truth frame $i$ referred to the same instant; a
+correlation-based check on a wraparound- and reliability-gate-free
+reference channel revealed this assumption was wrong by a consistent
+$\sim\!10$ frames, and we report a procedure -- fixed in advance on a
+single reference framework and channel, not tuned per result -- for
+detecting and correcting this class of error, which we believe is an
+underappreciated hazard whenever separately-captured video and
+motion-capture streams are paired by filename index rather than verified
+timestamp. After correction (91 of the original 101 frames retain a
+valid pairing), MoveNet-Lightning achieved a lower mean per-joint angle
+error (26.7\textdegree\ vs.\ 44.8\textdegree) and higher correlation with
+ground truth ($r=0.789$ vs.\ $r=0.669$) than MediaPipe on this pilot
+sequence. In further diagnosing these results we identify two additional
+evaluation pitfalls that would otherwise bias any framework comparison
+built on Euler-angle joint parameterizations: (i) naive degree-wise
+differencing overstates flexion error by 12--35\% whenever the true
 angle path crosses the $\pm180^\circ$ discontinuity of an
 \texttt{atan2}-based decomposition, and (ii) treating a
 geometrically-unobservable rotation estimate as a valid measurement
-produces framework-dependent, oppositely-signed bias. We report both raw
-and corrected metrics, quantify the mechanism behind each pitfall, and
-discuss the framework's remaining limitations, including the small,
-single-subject scale of the real-data pilot presented here.
+produces framework-dependent, oppositely-signed bias. We report raw,
+wraparound-corrected, and reliability-conditioned metrics throughout,
+quantify the mechanism behind each pitfall, and discuss the framework's
+remaining limitations -- including the small, single-subject scale of
+the real-data pilot, and the fact that repeated-measures significance
+testing on one continuous motion sequence should be read descriptively
+rather than as a properly powered inferential result.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -98,7 +111,7 @@ closed to new applicants for an extended period at the time of this
 work, leaving many groups without a path to real quantitative validation
 at all.
 
-This paper makes three contributions. First, we describe MonoArm, a
+This paper makes four contributions. First, we describe MonoArm, a
 benchmarking framework that computes four anatomically consistent
 bilateral joint angles (shoulder flexion-extension, shoulder
 abduction-adduction, shoulder internal-external rotation, and elbow
@@ -111,16 +124,23 @@ publicly distributed sequence from the CMU Panoptic Studio dataset
 \cite{joo2015panoptic}, and report the resulting comparison between
 MediaPipe and MoveNet-Lightning (PoseNet could not be evaluated in our
 deployment environment for a documented, reproducible reason given in
-Section~\ref{sec:setup}). Third, in the course of that validation we
-identify and quantify two concrete evaluation pitfalls -- an
-angle-wraparound artifact and a rotation-observability confound -- that
-inflate or bias error metrics in ways specific to Euler-angle
-parameterizations of joint orientation, and that we believe generalize
-to other monocular joint-angle benchmarking efforts using a similar
-decomposition.
+Section~\ref{sec:setup}). Third, we report a concrete case in which the
+naive assumption that a video stream and a separately-reconstructed
+motion-capture stream share a common frame index was wrong by a
+consistent margin, and give a pre-registered, non-circular procedure for
+detecting and correcting this -- a step we believe should be standard
+practice whenever such streams are paired by filename rather than
+verified timestamp, and one that materially changed our own reported
+numbers. Fourth, having corrected for that, we identify and quantify two
+further evaluation pitfalls -- an angle-wraparound artifact and a
+rotation-observability confound -- that inflate or bias error metrics in
+ways specific to Euler-angle parameterizations of joint orientation, and
+that we believe generalize to other monocular joint-angle benchmarking
+efforts using a similar decomposition.
 
 We emphasize at the outset that the real-data validation presented here
-is a single-subject, single-camera, 101-frame pilot, not a
+is a single-subject, single-camera pilot of 101 raw frames (91 after the
+temporal-alignment correction of Section~\ref{sec:sync}), not a
 large-\textit{N} benchmark; Section~\ref{sec:limitations} discusses this
 scope limitation and what a full H3.6M-scale validation under the same
 framework would add.
@@ -362,6 +382,43 @@ as coinciding with a coordinate singularity in the flexion angle.}
 \label{fig:sample}
 \end{figure}
 
+\subsection{Temporal Alignment Verification}
+\label{sec:sync}
+A first implementation of this validation paired video frame $i$ with
+ground-truth file \texttt{body3DScene\_i.json} directly, on the
+assumption that matching filename indices meant matching instants. This
+assumption is not guaranteed: the Panoptic Studio dome runs HD video
+capture and 3D body reconstruction as separate pipelines, and nothing in
+the distributed sequence asserts they share a common start time. Under
+this assumption the pipeline produced implausibly large errors even on
+DOF that later proved to be well-tracked, which prompted a direct check
+rather than acceptance of the numbers at face value.
+
+We test alignment by treating it as a lag-estimation problem: for
+candidate integer shifts $s$, we pair predicted frame $i$ with
+ground-truth frame $i+s$ and compute the Pearson correlation between the
+two resulting series, then take $\hat{s} = \arg\max_s r(s)$. To avoid
+choosing $s$ separately for whichever framework or joint it happens to
+flatter, we fix the procedure in advance: the reference channel is
+shoulder abduction, the only DOF free of both the rotation-reliability
+gate (Section~\ref{sec:angles}) and the $\pm180^\circ$ wraparound
+(Section~\ref{sec:results}), and the reference framework is MediaPipe,
+already designated the primary framework elsewhere in the MonoArm
+codebase (\texttt{scripts/run\_full\_pipeline.py}). This yields
+$\hat{s}=-10$ frames with $r=0.976$ at that shift (compared to
+$r\approx0.85$ under the original zero-offset assumption). As an
+independent consistency check -- computed after $\hat{s}$ was already
+fixed, and \emph{not} used to select it -- MoveNet-Lightning's own
+abduction channel implies $\hat{s}=-12$ ($r=0.940$), within two frames
+of the MediaPipe-derived estimate, which we take as evidence that both
+frameworks are responding to the same real misalignment rather than each
+independently producing a spurious optimum. The single offset
+$\hat{s}=-10$, not a per-framework or per-joint value, is applied to
+\emph{all} subsequent metrics in this paper, trimming the usable overlap
+from 101 to 91 frames. The analysis script implementing this procedure,
+\texttt{sync\_corrected\_evaluation.py}, is included with the paper's
+source materials for exact reproducibility.
+
 \subsection{Frameworks Evaluated}
 MediaPipe (BlazePose, Tasks API) and MoveNet-Lightning (via TensorFlow
 Hub) were run frame-by-frame on the extracted video, producing raw,
@@ -383,42 +440,75 @@ comparison to the two frameworks that executed successfully.
 \label{sec:results}
 
 \subsection{Full-Sequence Comparison}
-Table~\ref{tab:full} reports metrics over all 101 frames. MoveNet-Lightning
-achieved lower MPJAE (29.3\textdegree\ vs.\ 46.6\textdegree), higher
-correlation ($r=0.760$ vs.\ $0.587$), higher $R^2$ (0.349 vs.\ 0.006),
-and higher PCK@5\textdegree\ (32.4\% vs.\ 8.4\%) than MediaPipe on this
-sequence -- the opposite ranking from what the literature-calibrated
-synthetic noise profiles used elsewhere in the MonoArm codebase's smoke
-tests would predict, underscoring why a synthetic proxy cannot substitute
-for real validation. Both frameworks nonetheless retain moderate-to-good
-Pearson correlation despite large MAE, which -- combined with the
-diagnosis below -- indicates the error is dominated by systematic bias
-and parameterization sensitivity rather than uncorrelated tracking noise.
+Table~\ref{tab:full} reports metrics over the 91 frames that survive the
+temporal-alignment correction of Section~\ref{sec:sync}.
+MoveNet-Lightning achieved lower MPJAE (26.7\textdegree\ vs.\
+44.8\textdegree), higher correlation ($r=0.789$ vs.\ $0.669$), higher
+$R^2$ (0.412 vs.\ $-0.074$), and higher PCK@5\textdegree\ (34.1\% vs.\
+13.5\%) than MediaPipe on this sequence -- the opposite ranking from
+what the literature-calibrated synthetic noise profiles used elsewhere
+in the MonoArm codebase's smoke tests would predict, underscoring why a
+synthetic proxy cannot substitute for real validation. As a descriptive
+check on these differences (Table~\ref{tab:sig}), a paired Wilcoxon
+signed-rank test on the per-frame absolute-error differences is
+significant after Holm--Bonferroni correction for all four DOF; we
+report this for completeness since the framework implements the full
+protocol of Section~\ref{sec:metrics}, but emphasize that consecutive
+frames of one continuous motion are not independent observations, so
+these $p$-values should be read descriptively rather than as a properly
+powered inferential claim -- a point we return to in
+Section~\ref{sec:limitations}. Cohen's $d_z$ is more informative here:
+it is small for flexion ($d_z=0.17$) and abduction ($d_z=-0.58$,
+negative because MediaPipe is the more accurate side of that
+comparison), but large for elbow flexion ($d_z=1.29$) and rotation
+($d_z=0.72$), indicating the MediaPipe/MoveNet gap is concentrated in
+specific DOF rather than uniform across the arm.
 
 \begin{table}[t]
 \centering
-\caption{Full-sequence metrics, real CMU Panoptic Studio validation
-(101 frames, bilateral ZXY decomposition, right arm shown).
-$\downarrow$ lower is better, $\uparrow$ higher is better.}
+\caption{Full-sequence metrics after temporal-alignment correction, real
+CMU Panoptic Studio validation ($n=91$ frames, bilateral ZXY
+decomposition, right arm shown). $\downarrow$ lower is better,
+$\uparrow$ higher is better.}
 \label{tab:full}
 \begin{tabular}{@{}lcc@{}}
 \toprule
 Metric & MediaPipe & MoveNet-Lightning \\
 \midrule
-MPJAE $\downarrow$ (\textdegree)     & 46.56 & \textbf{29.28} \\
-RMSE $\downarrow$ (\textdegree)      & 59.69 & \textbf{48.44} \\
-Pearson $r$ $\uparrow$               & 0.587 & \textbf{0.760} \\
-$R^2$ $\uparrow$                     & 0.006 & \textbf{0.349} \\
-PCK@5\textdegree\ $\uparrow$ (\%)    & 8.4   & \textbf{32.4} \\
-PCK@10\textdegree\ $\uparrow$ (\%)   & 49.5  & \textbf{64.4} \\
-Jitter $\downarrow$ (\textdegree/fr) & \textbf{1.46} & 1.20 \\
+MPJAE $\downarrow$ (\textdegree)     & 44.80 & \textbf{26.68} \\
+RMSE $\downarrow$ (\textdegree)      & 56.12 & \textbf{44.58} \\
+Pearson $r$ $\uparrow$               & 0.669 & \textbf{0.789} \\
+$R^2$ $\uparrow$                     & $-0.074$ & \textbf{0.412} \\
+PCK@5\textdegree\ $\uparrow$ (\%)    & 13.5  & \textbf{34.1} \\
+PCK@10\textdegree\ $\uparrow$ (\%)   & \textbf{75.8}  & 65.9 \\
+Jitter $\downarrow$ (\textdegree/fr) & \textbf{1.51} & 1.28 \\
 \midrule
 \multicolumn{3}{@{}l}{\textit{Per-joint MAE (\textdegree)}} \\
 \midrule
-Shoulder flexion    & 67.76 & \textbf{49.60} \\
-Shoulder abduction  & \textbf{14.59} & 15.85 \\
-Shoulder rotation   & 75.51 & \textbf{31.99} \\
-Elbow flexion       & 28.38 & \textbf{19.69} \\
+Shoulder flexion    & 62.65 & \textbf{56.60} \\
+Shoulder abduction  & \textbf{6.13} & 11.38 \\
+Shoulder rotation   & 83.97 & \textbf{25.74} \\
+Elbow flexion       & 26.44 & \textbf{13.01} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Descriptive paired significance tests, MediaPipe vs.\
+MoveNet-Lightning absolute error, $n=91$ (see caveat in
+Section~\ref{sec:limitations} regarding within-sequence
+autocorrelation). All four DOF remain significant after
+Holm--Bonferroni correction at $\alpha=0.05$.}
+\label{tab:sig}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Joint & Wilcoxon $p$ & Cohen's $d_z$ & Sig.\ (Holm) \\
+\midrule
+Shoulder flexion   & 0.0210 & $+0.17$ & Yes \\
+Shoulder abduction & $<0.0001$ & $-0.58$ & Yes \\
+Shoulder rotation  & $<0.0001$ & $+0.72$ & Yes \\
+Elbow flexion      & $<0.0001$ & $+1.29$ & Yes \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -433,89 +523,100 @@ magnitude in a 33~ms interframe interval. Naive degree-wise differencing
 error whenever the true angle path crosses this cut. Replacing the
 difference with its circular form, $\Delta_{circ} =
 ((p-g)+180)\bmod 360 - 180$, and recomputing flexion MAE over the same
-101 frames:
+91 aligned frames:
 \begin{center}
 \begin{tabular}{@{}lcc@{}}
 \toprule
  & Naive MAE & Circular MAE \\
 \midrule
-MediaPipe          & 67.78\textdegree & 56.85\textdegree \ ($-16\%$) \\
-MoveNet-Lightning  & 49.60\textdegree & 37.37\textdegree \ ($-25\%$) \\
+MediaPipe          & 62.65\textdegree & 54.99\textdegree \ ($-12\%$) \\
+MoveNet-Lightning  & 56.60\textdegree & 36.98\textdegree \ ($-35\%$) \\
 \bottomrule
 \end{tabular}
 \end{center}
-Twelve and nine frames respectively (of 101) are wraparound-affected. The
-correction is substantial but not the whole story: even at
-56.85\textdegree/37.37\textdegree, flexion remains the least accurate
-DOF for both frameworks. We attribute the remainder to the ZXY
-decomposition's second singularity, distinct from the arm-hanging pole it
-was chosen to avoid: at $\theta_{abd}\!\to\!90^\circ$, both $v_y$ and
-$v_z$ in $\theta_{flex}=\operatorname{atan2}(-v_z,-v_y)$ approach zero
-simultaneously, so flexion becomes acutely sensitive to small measurement
-noise exactly where this pilot sequence's subject spends much of the
-clip (Fig.~\ref{fig:sample}; ground-truth abduction exceeds
+Eight and ten frames respectively (of 91) are wraparound-affected. The
+correction is substantial -- especially for MoveNet, where it removes
+over a third of the apparent flexion error -- but not the whole story:
+even at 54.99\textdegree/36.98\textdegree, flexion remains the least
+accurate DOF for both frameworks. We conjecture, but have not
+independently quantified, that the ZXY decomposition's second
+singularity contributes to the remainder: at
+$\theta_{abd}\!\to\!90^\circ$, both $v_y$ and $v_z$ in
+$\theta_{flex}=\operatorname{atan2}(-v_z,-v_y)$ approach zero
+simultaneously, so flexion becomes acutely sensitive to small
+measurement noise exactly where this pilot sequence's subject spends
+much of the clip (Fig.~\ref{fig:sample}; ground-truth abduction exceeds
 $60^\circ$ for roughly half the sequence). This is a property of any
 two-angle parameterization of a direction vector -- an unavoidable
 coordinate pole, analogous to longitude's degeneracy at the geographic
-poles -- and we flag \texttt{metrics.py}'s lack of circular-aware
-differencing as a concrete, fixable limitation of the current
-implementation (Section~\ref{sec:limitations}).
+poles -- but unlike the wraparound correction and the temporal-alignment
+correction, we have not directly measured that this pole, rather than
+ordinary tracking error, accounts for the remaining flexion MAE, and we
+flag this explicitly as an inference rather than a demonstrated finding.
+We do flag \texttt{metrics.py}'s lack of circular-aware differencing as
+a concrete, fixable limitation of the current implementation
+(Section~\ref{sec:limitations}).
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{figures/timeseries_vs_gt.png}
-\caption{Predicted vs.\ ground-truth angle time series over the 101-frame
-validation sequence. The ground-truth shoulder-flexion trace's jump
-between $+170^\circ$ and $-180^\circ$ (top panel, frames 68--100) is the
-$\operatorname{atan2}$ branch-cut artifact discussed in the text; the
-ground-truth shoulder-rotation trace held at exactly $0^\circ$ (third
-panel, frames 8--67) reflects the rotation-reliability gate.}
+\caption{Predicted vs.\ ground-truth angle time series over the 91-frame
+aligned validation sequence. The ground-truth shoulder-flexion trace's
+jump between $+170^\circ$ and $-180^\circ$ is the $\operatorname{atan2}$
+branch-cut artifact discussed in the text; the ground-truth
+shoulder-rotation trace held at exactly $0^\circ$ for extended stretches
+reflects the rotation-reliability gate.}
 \label{fig:timeseries}
 \end{figure}
 
 \subsection{Rotation-Reliability Masking}
-Table~\ref{tab:cond} restricts evaluation to the 36 of 101 frames where
-ground-truth elbow flexion $\geq 25^\circ$ -- the threshold at which
-shoulder rotation is geometrically observable
+Table~\ref{tab:cond} restricts evaluation to the 26 of 91 aligned frames
+where ground-truth elbow flexion $\geq 25^\circ$ -- the threshold at
+which shoulder rotation is geometrically observable
 (Section~\ref{sec:angles}). MediaPipe's rotation MAE falls sharply,
-75.51\textdegree$\to$17.74\textdegree, consistent with most of its
+83.97\textdegree$\to$16.24\textdegree, consistent with most of its
 unmasked rotation error coming from frames where the estimate was never
 geometrically meaningful. MoveNet's rotation MAE instead \emph{rises},
-31.99\textdegree$\to$89.75\textdegree. We traced this to a specific,
-verifiable mechanism: MoveNet-Lightning's own predicted elbow flexion
-crosses the $25^\circ$ reliability threshold in only 20.8\% of frames
-(mean predicted elbow flexion 20.7\textdegree\ against a ground-truth
-mean of 39.5\textdegree, i.e.\ MoveNet under-estimates elbow bend), so
-its rotation estimate defaults to the unreliable placeholder value
-$0^\circ$ in 71.3\% of frames regardless of the true angle -- reflected
-numerically in the unmasked full-sequence result, where MoveNet's
-rotation bias ($-31.99^\circ$) equals its MAE ($31.99^\circ$) to two
-decimal places, the signature of a near-constant offset rather than
-frame-varying noise. Restricting to frames where ground truth crosses the
-threshold selects disproportionately for frames where MoveNet's own
-gate has \emph{not} yet triggered, worsening its apparent rotation
-error even though the underlying cause -- systematic elbow-flexion
-under-estimation -- is a single, consistent failure mode. This is the
-clearest illustration in our results of why a reliability flag must be
-respected symmetrically by an evaluation harness: masking by
-ground-truth reliability alone, without also accounting for each
+25.74\textdegree$\to$80.54\textdegree. We traced this to a specific,
+verifiable mechanism that persists after the alignment correction:
+MoveNet-Lightning's own predicted elbow flexion crosses the $25^\circ$
+reliability threshold in only 23.1\% of the aligned frames (mean
+predicted elbow flexion 21.7\textdegree\ against a ground-truth mean of
+33.7\textdegree, i.e.\ MoveNet under-estimates elbow bend), so its
+rotation estimate defaults to the unreliable placeholder value
+$0^\circ$ in the large majority of frames regardless of the true angle
+-- reflected numerically in the unmasked full-sequence result, where
+MoveNet's rotation bias ($-20.29^\circ$) accounts for most of its MAE
+($25.74^\circ$), the signature of a substantially constant offset rather
+than purely frame-varying noise. Restricting to frames where ground
+truth crosses the threshold disproportionately selects frames where
+MoveNet's own gate has \emph{not} yet triggered, worsening its apparent
+rotation error even though the underlying cause -- systematic
+elbow-flexion under-estimation -- is a single, consistent failure mode.
+This is the clearest illustration in our results of why a reliability
+flag must be respected symmetrically by an evaluation harness: masking
+by ground-truth reliability alone, without also accounting for each
 framework's own reliability state, can make a bias-driven error look
 like an accuracy improvement or regression depending on which subset is
-chosen.
+chosen. That this pattern reproduces, in the same direction and with
+similar magnitude, both before and after the temporal-alignment
+correction (Section~\ref{sec:sync}) is itself evidence that it reflects
+a real property of MoveNet's elbow-flexion estimation rather than an
+artifact of misalignment.
 
 \begin{table}[t]
 \centering
 \caption{Rotation-reliable subset (ground-truth elbow flexion
-$\geq 25^\circ$, $n=36$ of 101 frames).}
+$\geq 25^\circ$, $n=26$ of 91 aligned frames).}
 \label{tab:cond}
 \begin{tabular}{@{}lcc@{}}
 \toprule
 Metric & MediaPipe & MoveNet-Lightning \\
 \midrule
-MPJAE $\downarrow$ (\textdegree)   & \textbf{37.45} & 54.91 \\
-Shoulder rotation MAE $\downarrow$ & \textbf{17.74} & 89.75 \\
-Shoulder flexion MAE $\downarrow$  & 81.00 & \textbf{65.18} \\
-Elbow flexion MAE $\downarrow$     & \textbf{37.31} & 42.10 \\
+MPJAE $\downarrow$ (\textdegree)   & \textbf{29.22} & 47.37 \\
+Shoulder rotation MAE $\downarrow$ & \textbf{16.24} & 80.54 \\
+Shoulder flexion MAE $\downarrow$  & \textbf{59.61} & 61.97 \\
+Elbow flexion MAE $\downarrow$     & 32.64 & \textbf{23.99} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -523,9 +624,9 @@ Elbow flexion MAE $\downarrow$     & \textbf{37.31} & 42.10 \\
 \subsection{Agreement and Error Distribution}
 Fig.~\ref{fig:summary} summarizes all metrics against the framework's
 5\textdegree\ per-DOF accuracy target (inherited from the original
-project specification's static-pose stability requirement); neither
-framework meets it on this pilot sequence for flexion, rotation, or
-elbow flexion, and both fall short on abduction (14.6\textdegree/15.9\textdegree). This
+project specification's static-pose stability requirement). MediaPipe's
+corrected abduction MAE (6.13\textdegree) comes close to that target;
+every other cell in Fig.~\ref{fig:summary} remains well above it. This
 target was calibrated for slow, deliberate calibration poses rather than
 the continuous arm-raising motion captured in this clip, and should not
 be read as a failure of either framework in absolute terms so much as a
@@ -536,8 +637,9 @@ to that target.
 \centering
 \includegraphics[width=\linewidth]{figures/validation_summary.png}
 \caption{Summary metrics and per-joint MAE for both frameworks against
-real CMU Panoptic Studio ground truth, with the project's
-5\textdegree\ target shown as a reference line on the per-joint panels.}
+real, temporal-alignment-corrected CMU Panoptic Studio ground truth,
+with the project's 5\textdegree\ target shown as a reference line on the
+per-joint panels.}
 \label{fig:summary}
 \end{figure}
 
@@ -545,16 +647,36 @@ real CMU Panoptic Studio ground truth, with the project's
 \label{sec:limitations}
 
 \textbf{Scale of the real-data validation.} The pilot reported here uses
-a single subject, a single camera view, and 101 consecutive frames of one
-continuous motion -- sufficient to run the full pipeline end to end on
-genuine (non-simulated) data and to surface the two evaluation pitfalls
-above, but not a substitute for a multi-subject, multi-action,
-statistically powered benchmark. The framework's statistical protocol
-(Section~\ref{sec:metrics}) is designed for, and should be re-run on, a
-larger sample -- either additional Panoptic Studio sequences and camera
-views, or Human3.6M once registration access is available, at which
-point the paired significance tests and Holm--Bonferroni correction
-become informative rather than nominal.
+a single subject, a single camera view, and one continuous motion of 91
+usable frames after alignment correction -- sufficient to run the full
+pipeline end to end on genuine (non-simulated) data and to surface the
+evaluation pitfalls above, but not a substitute for a multi-subject,
+multi-action, statistically powered benchmark. Table~\ref{tab:sig}'s
+significance tests should be read with this squarely in mind: consecutive
+frames of one continuous arm-raising motion are highly autocorrelated,
+not independent trials, so the effective sample size for a paired test
+is far smaller than $n=91$ suggests, and a Wilcoxon $p<0.0001$ here does
+not carry the same evidential weight it would across 91 independent
+subjects or takes. We report the tests because the framework implements
+them and because Cohen's $d_z$ is still informative as a descriptive
+effect-size summary, not as a claim that the MediaPipe/MoveNet comparison
+is properly powered. The framework's statistical protocol
+(Section~\ref{sec:metrics}) should be re-run on a larger, genuinely
+independent sample -- multiple subjects, actions, and camera views from
+Panoptic Studio, or Human3.6M once registration access is available --
+before its significance tests are treated as inferential rather than
+descriptive.
+
+\textbf{Temporal alignment as a standard check.} That a $\sim\!10$-frame
+misalignment was invisible until we deliberately tested for it, despite
+producing implausibly large errors on every DOF, is itself a finding: an
+evaluation harness that pairs video and motion-capture streams by
+filename index should verify alignment automatically (e.g.\ via the
+correlation-based procedure in Section~\ref{sec:sync} on a designated
+reference channel) before reporting any accuracy numbers, rather than
+leaving this to manual post-hoc inspection. We recommend
+\texttt{evaluate\_panoptic.py} and \texttt{evaluate\_h36m.py} both gain
+this as an automatic pre-flight check.
 
 \textbf{Metric corrections identified but not yet upstreamed.} The
 circular-differencing correction in Section~\ref{sec:results} was
@@ -586,6 +708,15 @@ Position Error, standard in the wider pose-estimation literature, is not
 yet implemented and would allow direct comparison with non-angular
 benchmarks.
 
+\textbf{The flexion-singularity attribution remains unconfirmed.}
+Section~\ref{sec:results} explicitly notes that, unlike the wraparound
+and temporal-alignment corrections, we have not measured a direct
+relationship between per-frame flexion error and proximity to the
+$\theta_{abd}\to90^\circ$ pole. We flag this rather than presenting it as
+settled, since doing otherwise would repeat, at smaller scale, the exact
+error this paper is about: reporting a plausible-sounding explanation as
+a demonstrated one.
+
 \section{Conclusion}
 We presented MonoArm, a benchmarking framework for monocular bilateral
 upper-limb joint angle estimation that compares three pose estimation
@@ -594,24 +725,42 @@ three temporal filters against ground truth rather than against the raw
 signal alone, and applies a full statistical-significance protocol to
 framework comparisons. In place of the registration-gated Human3.6M, we
 validated the live pipeline end to end on a real CMU Panoptic Studio
-sequence, finding MoveNet-Lightning more accurate than MediaPipe on this
-pilot clip (MPJAE 29.3\textdegree\ vs.\ 46.6\textdegree), and, in
-diagnosing that result, identified and quantified two evaluation
-pitfalls -- angle wraparound and asymmetric reliability masking -- that
-we believe are underappreciated hazards for any benchmark built on
-Euler-angle joint parameterizations. Extending this pilot to a
-statistically powered, multi-subject validation, resolving the PoseNet
-runtime incompatibility, and upstreaming the circular-error and
-reliability-aware metric corrections into the shipped evaluation
-pipeline are the immediate next steps.
+sequence. A first pass at this validation was contaminated by an
+unverified assumption that video and ground-truth streams shared a frame
+index; we report a pre-registered, non-circular procedure for detecting
+and correcting this $\sim\!10$-frame offset, which we believe is an
+underappreciated hazard for any benchmark pairing separately-captured
+video and motion-capture streams. After correction, MoveNet-Lightning
+was more accurate than MediaPipe on this pilot clip (MPJAE
+26.7\textdegree\ vs.\ 44.8\textdegree), and, in further diagnosing that
+result, we identified and quantified two additional evaluation pitfalls
+-- angle wraparound and asymmetric reliability masking -- that persisted
+under correct alignment and that we believe are underappreciated hazards
+for any benchmark built on Euler-angle joint parameterizations. We
+report descriptive paired significance tests for completeness but are
+explicit that a single continuous motion sequence does not license
+inferential claims about generalization. Extending this pilot to a
+statistically powered, multi-subject validation; resolving the PoseNet
+runtime incompatibility; upstreaming the circular-error,
+reliability-aware, and automatic-alignment-check corrections into the
+shipped evaluation pipeline; and independently quantifying the
+flexion-singularity contribution flagged in
+Section~\ref{sec:limitations} are the immediate next steps.
 
 \section*{Data and Code Availability}
 The CMU Panoptic Studio sequence \texttt{171204\_pose1\_sample} used for
-validation is publicly distributed by the dataset's maintainers for
-non-commercial research use; the subject is a data-collection participant
-included in that public release. All angle-solver, filter, metric, and
-evaluation code described in this paper is part of the authors'
-open MonoArm codebase.
+validation is, per the dataset maintainers' stated terms, ``freely
+available for non-commercial and research purpose only,'' conditional on
+citing at least one of the papers describing the dataset; we satisfy
+this by citing Joo~\textit{et al.}~\cite{joo2015panoptic}. The subject is
+a data-collection participant included in that public release, not a
+participant recruited for this study. All angle-solver, filter, metric,
+and evaluation code described in this paper is part of the authors' open
+MonoArm codebase; the temporal-alignment correction, significance
+testing, and figure-generation procedure of
+Sections~\ref{sec:sync}--\ref{sec:results} is implemented in
+\texttt{sync\_corrected\_evaluation.py}, distributed alongside this
+paper's source for exact reproducibility of every number reported above.
 
 \begin{thebibliography}{00}
 

@@ -1,8 +1,10 @@
 // AvatarMuscleController.cs
 // ==========================
-// Controls the humanoid avatar's RIGHT arm using Unity's HumanPoseHandler
-// and the muscle-space API. This approach is avatar-agnostic: it works with
-// any Humanoid-rigged model without hardcoding bone names or local axes.
+// Controls one of the humanoid avatar's arms (Right or Left, selectable via
+// the `side` field) using Unity's HumanPoseHandler and the muscle-space API.
+// This approach is avatar-agnostic: it works with any Humanoid-rigged model
+// without hardcoding bone names or local axes. For bilateral tracking, add
+// two instances of this component to the same Animator, one per side.
 //
 // Muscle Space
 // ------------
@@ -23,25 +25,32 @@
 // where neutral_deg is the angle that should map to muscle = 0, and
 // half_range_deg is the degrees from neutral to the +1 extreme.
 //
-// Right-Arm Muscle Indices
-// ------------------------
+// Muscle Indices
+// --------------
 // Muscle names are searched at Awake() via HumanTrait.MuscleName so that
 // the code is not sensitive to Unity version differences in muscle ordering.
+// `side` selects which set of names to search for:
 //
-//   "Right Arm Down-Up"      → shoulder abduction / adduction
-//   "Right Arm Front-Back"   → shoulder flexion / extension
-//   "Right Arm Roll In-Out"  → shoulder internal / external rotation
-//   "Right Forearm Stretch"  → elbow flexion
+//   "<Side> Arm Down-Up"      → shoulder abduction / adduction
+//   "<Side> Arm Front-Back"   → shoulder flexion / extension
+//   "<Side> Arm Roll In-Out"  → shoulder internal / external rotation
+//   "<Side> Forearm Stretch"  → elbow flexion
 
 using System;
 using UnityEngine;
 
 namespace MonoArm
 {
+    public enum ArmSide { Right, Left }
+
     [RequireComponent(typeof(Animator))]
     public class AvatarMuscleController : MonoBehaviour
     {
         // ── Inspector ───────────────────────────────────────────────────────
+
+        [Header("Side")]
+        [Tooltip("Which arm this controller instance drives. Add one instance per side for bilateral tracking.")]
+        public ArmSide side = ArmSide.Right;
 
         [Header("Smoothing")]
         [Tooltip("SmoothDamp time for each muscle value. Lower = faster but jitterier.")]
@@ -125,8 +134,9 @@ namespace MonoArm
         // ── Public API ──────────────────────────────────────────────────────
 
         /// <summary>
-        /// Apply a set of anatomical arm angles to the avatar's right arm muscles.
-        /// Call this once per frame from MonoArmManager.
+        /// Apply a set of anatomical arm angles to this controller's arm
+        /// (<see cref="side"/>) muscles. Call this once per frame from
+        /// MonoArmManager, once per side/controller instance.
         /// </summary>
         /// <param name="angles">Incoming joint angles (degrees) from the UDP receiver.</param>
         public void ApplyAngles(ArmAngles angles)
@@ -147,7 +157,7 @@ namespace MonoArm
             _targetRot   = Mathf.SmoothDamp(_targetRot,   tRot,   ref _velRot,   smoothTime, Mathf.Infinity, dt);
             _targetElbow = Mathf.SmoothDamp(_targetElbow, tElbow, ref _velElbow, smoothTime, Mathf.Infinity, dt);
 
-            // Read current full-body pose, patch right-arm muscles, write back
+            // Read current full-body pose, patch this side's arm muscles, write back
             _poseHandler.GetHumanPose(ref _pose);
 
             _pose.muscles[_idxFlexion]   = _targetFlex;
@@ -181,16 +191,17 @@ namespace MonoArm
 
         void ResolveMusclIndices()
         {
-            // Find each right-arm muscle by name substring match.
+            // Find each <side>-arm muscle by name substring match.
             // HumanTrait.MuscleName is consistent across Unity versions.
+            string sideName = side.ToString(); // "Right" or "Left"
             string[] names = HumanTrait.MuscleName;
             for (int i = 0; i < names.Length; i++)
             {
                 string n = names[i];
-                if (n == "Right Arm Front-Back")  _idxFlexion   = i;
-                else if (n == "Right Arm Down-Up")     _idxAbduction = i;
-                else if (n.Contains("Right Arm Roll") || n.Contains("Right Arm Twist") || n.Contains("Right Arm In-Out"))  _idxRotation  = i;
-                else if (n == "Right Forearm Stretch")  _idxElbow     = i;
+                if (n == $"{sideName} Arm Front-Back")  _idxFlexion   = i;
+                else if (n == $"{sideName} Arm Down-Up")     _idxAbduction = i;
+                else if (n.Contains($"{sideName} Arm Roll") || n.Contains($"{sideName} Arm Twist") || n.Contains($"{sideName} Arm In-Out"))  _idxRotation  = i;
+                else if (n == $"{sideName} Forearm Stretch")  _idxElbow     = i;
             }
 
             bool ok = _idxFlexion >= 0 && _idxAbduction >= 0 &&
@@ -200,23 +211,23 @@ namespace MonoArm
             {
                 string available = "";
                 for(int i=0; i<names.Length; i++) {
-                    if (names[i].Contains("Right Arm") || names[i].Contains("Right Forearm")) {
+                    if (names[i].Contains($"{sideName} Arm") || names[i].Contains($"{sideName} Forearm")) {
                         available += " - " + names[i] + "\n";
                     }
                 }
                 Debug.LogError(
-                    "[AvatarMuscleController] One or more right-arm muscle indices not found.\n" +
+                    $"[AvatarMuscleController:{sideName}] One or more {sideName.ToLowerInvariant()}-arm muscle indices not found.\n" +
                     "Ensure the avatar is configured as Humanoid in the FBX import settings.\n" +
                     $"  Flexion idx   = {_idxFlexion}\n" +
                     $"  Abduction idx = {_idxAbduction}\n" +
                     $"  Rotation idx  = {_idxRotation}\n" +
                     $"  Elbow idx     = {_idxElbow}\n" +
-                    $"Available right arm muscles in this Unity version:\n{available}");
+                    $"Available {sideName.ToLowerInvariant()} arm muscles in this Unity version:\n{available}");
                 enabled = false;
             }
             else
             {
-                Debug.Log("[AvatarMuscleController] Right-arm muscles resolved: " +
+                Debug.Log($"[AvatarMuscleController:{sideName}] Muscles resolved: " +
                           $"flex={_idxFlexion} abd={_idxAbduction} " +
                           $"rot={_idxRotation} elbow={_idxElbow}");
             }

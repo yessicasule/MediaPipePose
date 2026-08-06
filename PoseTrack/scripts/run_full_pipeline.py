@@ -46,8 +46,8 @@ import cv2
 import numpy as np
 
 from src.pose import load_estimator, PoseEstimator
-from src.processing.angle_solver import compute_arm_angles, ArmAngles
-from src.processing.angle_filter import AngleFilterBank
+from src.processing.angle_solver import compute_arm_angles, compute_bilateral_angles, ArmAngles, BilateralArmAngles
+from src.processing.angle_filter import BilateralFilterBank
 from src.processing.calibration import CalibrationManager, REQUIRED_POSES
 from src.processing.angle_logger import CsvAngleLogger, RollingAnglePlot
 from src.streaming.udp_streamer import UdpAngleSender
@@ -78,9 +78,11 @@ FRAMEWORK_DISPLAY_NAMES = {
     "posenet":           "PoseNet",
 }
 
-# MediaPipe right-arm connections for skeleton overlay
-_ARM_CONNECTIONS = [(12, 14), (14, 16)]
+# MediaPipe bilateral arm connections for skeleton overlay
+_RIGHT_ARM_CONNECTIONS = [(12, 14), (14, 16)]
+_LEFT_ARM_CONNECTIONS  = [(11, 13), (13, 15)]
 _KEY_INDICES     = [11, 12, 13, 14, 15, 16, 23, 24]
+_LEFT_COLOR = (255, 220, 120)   # accent color so the left arm reads distinctly from the framework color
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +121,7 @@ def draw_skeleton(
     color: tuple,
     label: str = "",
 ) -> None:
-    """Draw right-arm skeleton overlay on a frame panel."""
+    """Draw bilateral (both arms) skeleton overlay on a frame panel."""
     h, w = img.shape[:2]
     if landmarks is None:
         cv2.putText(img, "NO POSE", (w // 2 - 40, h // 2),
@@ -131,13 +133,14 @@ def draw_skeleton(
             lm = landmarks[idx]
             cx, cy = int(lm.x * w), int(lm.y * h)
             is_right_arm = idx in (12, 14, 16)
-            c = color if is_right_arm else _GREY
-            radius = 6 if is_right_arm else 4
+            is_left_arm  = idx in (11, 13, 15)
+            c = color if is_right_arm else (_LEFT_COLOR if is_left_arm else _GREY)
+            radius = 6 if (is_right_arm or is_left_arm) else 4
             cv2.circle(img, (cx, cy), radius, c, -1, cv2.LINE_AA)
         except (IndexError, AttributeError):
             pass
 
-    for a, b in _ARM_CONNECTIONS:
+    for a, b in _RIGHT_ARM_CONNECTIONS:
         try:
             lmA, lmB = landmarks[a], landmarks[b]
             pt1 = (int(lmA.x * w), int(lmA.y * h))
@@ -146,16 +149,25 @@ def draw_skeleton(
         except (IndexError, AttributeError):
             pass
 
+    for a, b in _LEFT_ARM_CONNECTIONS:
+        try:
+            lmA, lmB = landmarks[a], landmarks[b]
+            pt1 = (int(lmA.x * w), int(lmA.y * h))
+            pt2 = (int(lmB.x * w), int(lmB.y * h))
+            cv2.line(img, pt1, pt2, _LEFT_COLOR, 3, cv2.LINE_AA)
+        except (IndexError, AttributeError):
+            pass
+
 
 def draw_angle_hud(
     img: np.ndarray,
-    angles: ArmAngles | None,
+    angles: BilateralArmAngles | None,
     framework_name: str,
     color: tuple,
     fps: float | None = None,
     is_primary: bool = False,
 ) -> None:
-    """Draw the angle values HUD onto a panel."""
+    """Draw the bilateral (right + left) angle values HUD onto a panel."""
     h, w = img.shape[:2]
 
     # Framework name header
@@ -170,22 +182,29 @@ def draw_angle_hud(
         cv2.putText(img, f"FPS:{fps:.1f}",
                     (w - 80, 20), _FONT, 0.4, _GREY, 1, cv2.LINE_AA)
 
+    right = angles.right if angles else None
+    left  = angles.left  if angles else None
+
     # Angle values panel
-    if angles is not None:
+    if right is not None or left is not None:
         panel_y = h - 110
         overlay2 = img.copy()
         cv2.rectangle(overlay2, (0, panel_y), (w, h), _BLACK, -1)
         cv2.addWeighted(overlay2, 0.5, img, 0.5, 0, img)
 
-        lines = [
-            (f"Flex  {angles.shoulder_flexion:+7.1f} deg",  (100, 220, 100)),
-            (f"Abd   {angles.shoulder_abduction:+7.1f} deg", (100, 160, 255)),
-            (f"Rot   {angles.shoulder_rotation:+7.1f} deg",  _WHITE),
-            (f"Elbow {angles.elbow_flexion:+7.1f} deg",      (220, 80, 220)),
-        ]
-        for i, (text, c) in enumerate(lines):
+        def _side_lines(a: ArmAngles | None, prefix: str) -> list[str]:
+            if a is None:
+                return [f"{prefix} --"]
+            return [
+                f"{prefix} Flex {a.shoulder_flexion:+6.1f}  Abd {a.shoulder_abduction:+6.1f}",
+                f"{prefix} Rot  {a.shoulder_rotation:+6.1f}  Elb {a.elbow_flexion:+6.1f}",
+            ]
+
+        lines = _side_lines(right, "R") + _side_lines(left, "L")
+        colors = [(100, 220, 100), (100, 160, 255), _LEFT_COLOR, _LEFT_COLOR]
+        for i, text in enumerate(lines):
             cv2.putText(img, text, (6, panel_y + 20 + i * 22),
-                        _FONT, 0.45, c, 1, cv2.LINE_AA)
+                        _FONT, 0.42, colors[i % len(colors)], 1, cv2.LINE_AA)
     else:
         cv2.putText(img, "No pose detected", (6, h - 20),
                     _FONT, 0.5, _RED, 1, cv2.LINE_AA)
@@ -301,17 +320,17 @@ class FrameworkState:
         self.display_name = FRAMEWORK_DISPLAY_NAMES.get(name, name)
         self.color = FRAMEWORK_COLORS.get(name, _WHITE)
         self.runner = runner
-        self.filt = AngleFilterBank(filter_type=filter_type, stream_hz=hz)
+        self.filt = BilateralFilterBank(filter_type=filter_type, stream_hz=hz)
         self.landmarks = None
-        self.raw_angles: ArmAngles | None = None
-        self.filt_angles: ArmAngles | None = None
+        self.raw_angles: BilateralArmAngles | None = None
+        self.filt_angles: BilateralArmAngles | None = None
         self.inference_ms: float = 0.0
         self.detection_count = 0
         self.frame_count = 0
         self.total_inference_ms = 0.0
 
     def process_frame(self, rgb: np.ndarray) -> None:
-        """Run inference + angle solver + filter for one frame."""
+        """Run inference + bilateral angle solver + filter for one frame."""
         self.frame_count += 1
         t0 = time.perf_counter()
         self.landmarks = self.runner.process(rgb)
@@ -319,8 +338,8 @@ class FrameworkState:
         self.total_inference_ms += self.inference_ms
 
         if self.landmarks is not None:
-            self.raw_angles = compute_arm_angles(self.landmarks)
-            if self.raw_angles is not None:
+            self.raw_angles = compute_bilateral_angles(self.landmarks)
+            if self.raw_angles is not None and (self.raw_angles.right or self.raw_angles.left):
                 self.detection_count += 1
                 self.filt_angles = self.filt.update(self.raw_angles)
             else:
@@ -330,7 +349,7 @@ class FrameworkState:
             self.filt_angles = None
 
     def reset_filter(self, filter_type: str, hz: float) -> None:
-        self.filt = AngleFilterBank(filter_type=filter_type, stream_hz=hz)
+        self.filt = BilateralFilterBank(filter_type=filter_type, stream_hz=hz)
 
     @property
     def avg_fps(self) -> float:
@@ -375,26 +394,33 @@ class MultiFrameworkLogger:
             w = csv.writer(f)
             w.writerow([
                 "frame", "elapsed_s",
-                "shoulder_flexion", "shoulder_abduction",
-                "shoulder_rotation", "elbow_flexion",
-                "detected",
+                "right_shoulder_flexion", "right_shoulder_abduction",
+                "right_shoulder_rotation", "right_elbow_flexion",
+                "left_shoulder_flexion", "left_shoulder_abduction",
+                "left_shoulder_rotation", "left_elbow_flexion",
+                "right_detected", "left_detected",
             ])
             self._writers[name] = (f, w)
 
     def log(self, states: dict[str, FrameworkState]) -> None:
         elapsed = time.perf_counter() - self._start_time
+
+        def _fields(a: ArmAngles | None) -> list:
+            if a is None:
+                return [0, 0, 0, 0]
+            return [f"{a.shoulder_flexion:.2f}", f"{a.shoulder_abduction:.2f}",
+                    f"{a.shoulder_rotation:.2f}", f"{a.elbow_flexion:.2f}"]
+
         for name, (f, w) in self._writers.items():
             st = states.get(name)
-            if st and st.filt_angles:
-                a = st.filt_angles
-                w.writerow([
-                    self._frame, f"{elapsed:.3f}",
-                    f"{a.shoulder_flexion:.2f}", f"{a.shoulder_abduction:.2f}",
-                    f"{a.shoulder_rotation:.2f}", f"{a.elbow_flexion:.2f}",
-                    1,
-                ])
-            else:
-                w.writerow([self._frame, f"{elapsed:.3f}", 0, 0, 0, 0, 0])
+            bilateral = st.filt_angles if st else None
+            right = bilateral.right if bilateral else None
+            left  = bilateral.left  if bilateral else None
+            w.writerow([
+                self._frame, f"{elapsed:.3f}",
+                *_fields(right), *_fields(left),
+                int(right is not None), int(left is not None),
+            ])
         self._frame += 1
 
     def close(self) -> None:
@@ -482,10 +508,10 @@ def main() -> None:
         # verbose=False: TX status is shown in this script's own console
         # progress line instead of the sender's periodic log.
         sender = UdpAngleSender(host=args.host, port=args.port, hz=args.hz,
-                                verbose=False)
+                                bilateral=True, verbose=False)
         sender.start()
         print(f"[OK] UDP streaming to {args.host}:{args.port} at {args.hz} Hz "
-              f"(MediaPipe angles -> single Unity avatar)")
+              f"(MediaPipe bilateral angles -> Unity avatar)")
 
     # ── Video capture ─────────────────────────────────────────────────────
     if args.video:
@@ -566,14 +592,18 @@ def main() -> None:
             # ── Apply calibration to primary framework ────────────────────
             # Only MediaPipe (calibrated + filtered — the most accurate
             # output) is streamed to Unity; the other frameworks are for
-            # on-screen comparison and CSV logging only.
+            # on-screen comparison and CSV logging only. Calibration is
+            # right-arm-only (CalibrationManager predates bilateral support);
+            # the left arm is streamed filtered but uncalibrated.
             primary = states[PRIMARY_FRAMEWORK]
-            if primary.filt_angles is not None:
-                calibrated_angles = calib_mgr.apply(primary.filt_angles)
+            if primary.filt_angles is not None and primary.filt_angles.right is not None:
+                calibrated_right = calib_mgr.apply(primary.filt_angles.right)
                 if sender is not None:
-                    sender.update(calibrated_angles)
-                # Update rolling plot
-                plot.update(calibrated_angles)
+                    sender.update_bilateral(BilateralArmAngles(
+                        right=calibrated_right, left=primary.filt_angles.left,
+                    ))
+                # Update rolling plot (right arm only)
+                plot.update(calibrated_right)
 
             # ── Build comparison display ──────────────────────────────────
             panels = []
