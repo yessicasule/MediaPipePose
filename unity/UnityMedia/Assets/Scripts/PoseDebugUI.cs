@@ -34,7 +34,7 @@ namespace MonoArm
         Text   _dataLabel;
         float  _nextRefresh;
         float  _lastDataTime;
-        int    _pktCount;
+        int    _lastSeenPacketCount;
 
         readonly StringBuilder _sb = new(256);
 
@@ -49,9 +49,14 @@ namespace MonoArm
         void Update()
         {
             if (receiver == null) return;
-            if (receiver.HasData)
+
+            // receiver.HasData stays true forever once the first packet arrives, so
+            // gating on it alone would count every Unity frame as a new packet and
+            // never let _lastDataTime go stale. Compare against receiver.PacketCount
+            // (incremented only when a genuine new packet is consumed) instead.
+            if (receiver.PacketCount != _lastSeenPacketCount)
             {
-                _pktCount++;
+                _lastSeenPacketCount = receiver.PacketCount;
                 _lastDataTime = Time.unscaledTime;
             }
 
@@ -84,7 +89,7 @@ namespace MonoArm
             _sb.Append(Row("Abd",   a.shoulderAbduction,  "#64a0ff"));  // blue
             _sb.Append(Row("Rot",   a.shoulderRotation,   "#ffb450"));  // orange
             _sb.Append(Row("Elbow", a.elbowFlexion,       "#dc50dc"));  // purple
-            _sb.Append($"\n<color=#444>pkts {_pktCount}   {age * 1000f:F0}ms{warn}</color>");
+            _sb.Append($"\n<color=#444>pkts {receiver.PacketCount}   {age * 1000f:F0}ms{warn}</color>");
 
             _dataLabel.text = _sb.ToString();
         }

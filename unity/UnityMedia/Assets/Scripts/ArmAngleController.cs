@@ -123,7 +123,7 @@ namespace MonoArm
             _poseHandler = new HumanPoseHandler(anim.avatar, anim.transform);
             _poseHandler.GetHumanPose(ref _pose);
 
-            ResolveMusclIndices();
+            ResolveMuscleIndices();
         }
 
         void OnDestroy()
@@ -142,7 +142,12 @@ namespace MonoArm
         public void ApplyAngles(ArmAngles angles)
         {
             if (_poseHandler == null) return;
-            if (_idxFlexion < 0)     return;   // muscles not resolved
+            // enabled==false only stops this component's own Unity messages
+            // (Update, etc.) — MonoArmManager calls ApplyAngles() directly, so a
+            // partially-resolved muscle set (e.g. flexion found but abduction not)
+            // must still be guarded here, or _pose.muscles[-1] throws.
+            if (_idxFlexion < 0 || _idxAbduction < 0 || _idxRotation < 0 || _idxElbow < 0)
+                return;   // muscles not fully resolved
 
             // Convert degrees → muscle values [-1, +1]
             float tFlex  = DegreesToMuscle(angles.shoulderFlexion   - flexionOffset,   flexionMin,   flexionMax);
@@ -189,7 +194,7 @@ namespace MonoArm
             return Mathf.Clamp(muscle, -1f, 1f);
         }
 
-        void ResolveMusclIndices()
+        void ResolveMuscleIndices()
         {
             // Find each <side>-arm muscle by name substring match.
             // HumanTrait.MuscleName is consistent across Unity versions.

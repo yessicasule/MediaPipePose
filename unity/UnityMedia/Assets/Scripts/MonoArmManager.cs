@@ -69,6 +69,24 @@ namespace MonoArm
             // Forward left-arm angles when the latest packet was bilateral.
             if (receiver.IsBilateral && leftArmController != null)
                 leftArmController.ApplyAngles(receiver.LatestBilateralAngles.left);
+
+            LogStatusIfDue();
+        }
+
+        void LogStatusIfDue()
+        {
+            if (logIntervalSeconds <= 0f) return;
+
+            _logTimer += Time.unscaledDeltaTime;
+            if (_logTimer < logIntervalSeconds) return;
+            _logTimer = 0f;
+
+            ArmAngles r = receiver.LatestAngles;
+            string msg = $"[MonoArmManager] pkts={receiver.PacketCount} " +
+                         $"R[{r}]";
+            if (receiver.IsBilateral && leftArmController != null)
+                msg += $" L[{receiver.LatestBilateralAngles.left}]";
+            Debug.Log(msg);
         }
     }
 }

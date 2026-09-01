@@ -125,18 +125,13 @@ def run_live_predictions(
 
         runner.close()
 
-        for j in JOINTS_BILATERAL:
-            arr = np.array(angles_per_joint[j])
-            nan_mask = np.isnan(arr)
-            if nan_mask.any() and not nan_mask.all():
-                ix = np.arange(len(arr))
-                valid = ix[~nan_mask]
-                arr = np.interp(ix, valid, arr[valid])
-            elif nan_mask.all():
-                arr = np.zeros(len(arr))
-            angles_per_joint[j] = arr
-
-        preds[fw_name] = angles_per_joint
+        # NaN frames (no detection) are kept as NaN and excluded per-joint by
+        # metrics.compute_joint_metrics(), never interpolated or fabricated —
+        # matching live_predictions() in evaluate_h36m.py and the paper's
+        # stated policy ("frames with either signal missing are excluded,
+        # never imputed"). Interpolating or zero-filling here would hide
+        # real tracking failures and bias the reported error metrics.
+        preds[fw_name] = {j: np.array(v, dtype=np.float64) for j, v in angles_per_joint.items()}
         det_rate = 100.0 * (len(frame_idx) - n_missing) / len(frame_idx)
         print(f"  [{fw_name}] done. Frames read: {det_rate:.0f}%")
 
