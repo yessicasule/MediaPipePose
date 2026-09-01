@@ -56,6 +56,24 @@ Webcam ─▶ 2D pose network ─▶ torso reference frame ─▶ two-link joint
 The three filters run on every frame so raw and filtered signals can be compared
 live; only the selected filter is transmitted and logged.
 
+## Dashboard
+
+The browser dashboard is the primary interface: a live skeleton overlay, per-arm
+joint-angle readouts, raw-versus-filtered traces with a hover readout, the
+step-by-step derivation for the current frame, a per-stage latency breakdown, the
+live UDP packets going to Unity, calibration, session recording, and a gallery of
+the figures the analysis scripts produce.
+
+Every card has an **Explain** disclosure describing what it measures and how,
+rendered from the same module the code uses, so documentation and implementation
+cannot drift apart. A theme toggle switches light and dark; the choice persists
+and the charts and server-rendered plots follow it.
+
+Colours come from the project palette — ink black `#011627`, porcelain `#fdfffc`,
+light sea green `#2ec4b6` — with chart series stepped per mode and validated for
+contrast and colour-vision separation. See
+[`docs/web_pipeline.md`](docs/web_pipeline.md#4a-theme-and-colour).
+
 ---
 
 ## Repository layout

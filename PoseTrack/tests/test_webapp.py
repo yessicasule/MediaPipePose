@@ -362,6 +362,29 @@ class TestHttpApi:
             json.dumps(explain_payload())
         )
 
+    def test_figures_are_listed_from_disk(self, client):
+        data = client.get("/api/figures").json()
+        keys = {g["key"] for g in data["groups"]}
+        assert keys == {"outputs", "paper"}
+        for group in data["groups"]:
+            for fig in group["figures"]:
+                assert fig["id"].startswith(group["key"] + "/")
+                assert fig["size_bytes"] > 0
+
+    def test_figure_paths_cannot_escape_their_root(self, client):
+        for bad in ("paper/../../../etc/passwd", "outputs/../../README.md",
+                    "nope/x.png", "paper/does-not-exist.png"):
+            assert client.get(f"/api/figures/{bad}").status_code == 404
+
+    def test_a_listed_figure_can_be_fetched(self, client):
+        data = client.get("/api/figures").json()
+        figs = [f for g in data["groups"] for f in g["figures"]]
+        if not figs:
+            pytest.skip("no figures on disk in this checkout")
+        r = client.get(f"/api/figures/{figs[0]['id']}")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/")
+
     def test_udp_can_be_disabled_and_re_enabled(self, client):
         off = client.post("/api/udp", json={"enabled": False}).json()
         assert off["enabled"] is False

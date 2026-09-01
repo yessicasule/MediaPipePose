@@ -41,7 +41,7 @@ system on hardware with a camera are marked as such rather than claimed.
 | `webapp/metrics.py` | rolling latency, throughput, angle stability and keypoint jitter statistics |
 | `webapp/explain.py` | description of every reported quantity, served to the UI at `/api/explain` |
 | `webapp/sources.py` | browser / server-camera / recorded-video frame sources |
-| `webapp/static/index.html`, `app.js`, `style.css` | the dashboard, with no external assets |
+| `webapp/static/index.html`, `app.js`, `style.css` | the dashboard, with no external assets: sidebar layout, light/dark themes, expandable per-card explanations, hover-readable charts, figure gallery |
 | `scripts/run_web.py` | launcher |
 
 ---
@@ -109,6 +109,7 @@ system on hardware with a camera are marked as such rather than claimed.
 | `src/evaluation/eval_plots.py` | publication-format figures |
 | `src/evaluation/occlusion_test.py` | occlusion robustness benchmark |
 | `src/evaluation/ablation.py` | ablation harness |
+| `webapp/server.py` figure endpoints | serves the figures the scripts above produce into the dashboard gallery |
 | `scripts/evaluate_h36m.py`, `scripts/evaluate_panoptic.py` | ground-truth validation against public datasets (datasets not bundled) |
 
 ---

@@ -57,6 +57,36 @@ from .sources import ServerFrameSource, SourceError, encode_jpeg, probe_cameras
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 WEB_OUTPUT_DIR = Path(OUTPUTS_DIR) / "web"
 
+# Directories scanned for figures the project itself generates: the evaluation
+# and benchmark plots written under outputs/, and the figures committed with the
+# paper draft. Nothing is generated here — the gallery only surfaces what the
+# analysis scripts actually produced, so an empty gallery honestly means those
+# scripts have not been run yet.
+FIGURE_ROOTS = {
+    "outputs": Path(OUTPUTS_DIR),
+    "paper":   Path(OUTPUTS_DIR).parent.parent / "docs" / "paper" / "figures",
+}
+FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
+FIGURE_MEDIA = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml", ".webp": "image/webp",
+}
+
+# Which script produces which figure, so the gallery can tell the reader how to
+# regenerate one rather than presenting it as an unexplained image.
+FIGURE_PROVENANCE = {
+    "bland_altman":       ("src/evaluation/eval_plots.py", "Agreement between estimated and ground-truth angles: difference against mean, with limits of agreement."),
+    "error_cdf":          ("src/evaluation/eval_plots.py", "Cumulative distribution of absolute angle error — read off what fraction of frames fall under a given error."),
+    "scatter_gt":         ("src/evaluation/eval_plots.py", "Estimated angle against ground truth; the diagonal is perfect agreement."),
+    "timeseries_vs_gt":   ("src/evaluation/eval_plots.py", "Estimated and ground-truth angle over time for one sequence."),
+    "validation_summary": ("src/evaluation/eval_plots.py", "Per-channel error summary across the validation set."),
+    "filter_comparison":  ("scripts/compare_filters.py", "Raw against each filter on the same recorded signal."),
+    "benchmark_dashboard":("benchmarks/visualize_benchmarks.py", "Frame rate, latency and jitter across the pose frameworks."),
+    "accuracy_comparison":("benchmarks/visualize_benchmarks.py", "Accuracy comparison across the pose frameworks."),
+    "occlusion":          ("src/evaluation/occlusion_test.py", "Tracking behaviour as occlusion increases."),
+    "latency":            ("scripts/benchmark_latency.py", "Per-component latency distribution."),
+}
+
 # Frameworks the UI offers. Availability is probed lazily: selecting one that
 # is not installed returns the import error rather than failing silently.
 FRAMEWORKS = ("mediapipe", "movenet_lightning", "movenet_thunder", "posenet")
@@ -394,11 +424,74 @@ async def session_summary(name: str) -> dict:
     }
 
 
-@app.get("/api/sessions/{name}/plot.png")
-async def session_plot(name: str, side: str = Query("right")) -> Response:
-    """Render the logged joint-angle time series for a recorded session."""
+# Chart colours, validated against both surfaces with the dataviz palette
+# checker (lightness band, chroma floor, CVD separation, normal-vision floor and
+# contrast, all-pairs). Light steps sit on porcelain, dark steps on ink-black.
+PLOT_THEMES = {
+    "light": {
+        "surface": "#fdfffc", "panel": "#ffffff", "ink": "#011627",
+        "muted": "#5b6b7a", "grid": "#dfe6ea",
+        "series": ["#1f9e93", "#cf6c25", "#6d4fd1"], "raw": "#8b9aa8",
+    },
+    "dark": {
+        "surface": "#011627", "panel": "#04223a", "ink": "#fdfffc",
+        "muted": "#8fa3b5", "grid": "#123049",
+        "series": ["#26a396", "#cd7734", "#8f78dd"], "raw": "#5d7288",
+    },
+}
+
+CHANNELS = ["shoulder_flexion", "shoulder_abduction",
+            "shoulder_rotation", "elbow_flexion"]
+
+CHANNEL_LABELS = {
+    "shoulder_flexion":   "Shoulder flexion",
+    "shoulder_abduction": "Shoulder abduction",
+    "shoulder_rotation":  "Shoulder rotation",
+    "elbow_flexion":      "Elbow flexion",
+}
+
+
+def _read_session_series(path: Path, side: str) -> tuple[list, dict]:
+    """Read one side's angle channels out of a session CSV."""
     import csv as _csv
 
+    t: list[float] = []
+    series: dict[str, list[float]] = {c: [] for c in CHANNELS}
+    with open(path, newline="") as f:
+        for row in _csv.DictReader(f):
+            try:
+                t.append(float(row.get("timestamp_s") or 0.0))
+            except ValueError:
+                continue
+            for c in CHANNELS:
+                v = row.get(f"{side}_{c}")
+                series[c].append(float(v) if v not in (None, "") else float("nan"))
+    return t, series
+
+
+def _style_axes(ax, theme: dict) -> None:
+    """Apply the dashboard's chart styling: recessive grid, no chart junk."""
+    ax.set_facecolor(theme["panel"])
+    ax.grid(True, color=theme["grid"], linewidth=0.8, alpha=0.9)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(theme["grid"])
+    ax.tick_params(colors=theme["muted"], labelsize=8, length=0)
+
+
+@app.get("/api/sessions/{name}/plot.png")
+async def session_plot(name: str, side: str = Query("right"),
+                       theme: str = Query("light")) -> Response:
+    """
+    Joint-angle time series for a recorded session, rendered in the dashboard's
+    palette so a downloaded figure matches what is on screen.
+
+    Gaps where the limb was not tracked stay gaps: the CSV stores empty cells
+    for those frames and they are plotted as NaN, so the line breaks rather than
+    interpolating across an interval where nothing was measured.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -406,39 +499,165 @@ async def session_plot(name: str, side: str = Query("right")) -> Response:
     path = _resolve_session(name)
     if side not in ("right", "left"):
         raise HTTPException(400, "side must be 'right' or 'left'")
+    th = PLOT_THEMES.get(theme, PLOT_THEMES["light"])
 
-    channels = ["shoulder_flexion", "shoulder_abduction",
-                "shoulder_rotation", "elbow_flexion"]
-    t: list[float] = []
-    series: dict[str, list[float | None]] = {c: [] for c in channels}
-
-    with open(path, newline="") as f:
-        for row in _csv.DictReader(f):
-            try:
-                t.append(float(row.get("timestamp_s") or 0.0))
-            except ValueError:
-                continue
-            for c in channels:
-                v = row.get(f"{side}_{c}")
-                series[c].append(float(v) if v not in (None, "") else np.nan)
-
+    t, series = _read_session_series(path, side)
     if not t:
         raise HTTPException(422, "Session log contains no usable rows.")
 
-    fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
-    for ax, c in zip(axes, channels):
-        ax.plot(t, series[c], linewidth=1.2)
-        ax.set_ylabel(c.replace("shoulder_", "sh. ").replace("_", " ") + "\n[deg]",
-                      fontsize=8)
-        ax.grid(alpha=0.3)
-    axes[-1].set_xlabel("time [s]")
-    fig.suptitle(f"{path.name} — {side} arm joint angles", fontsize=11)
-    fig.tight_layout()
+    fig, axes = plt.subplots(4, 1, figsize=(9, 7.2), sharex=True,
+                             facecolor=th["surface"])
+    for ax, c in zip(axes, CHANNELS):
+        ax.plot(t, series[c], linewidth=1.6, color=th["series"][0],
+                solid_capstyle="round")
+        ax.set_ylabel("deg", color=th["muted"], fontsize=8)
+        # The channel is named on the plot itself, so a single-series chart
+        # needs no legend box.
+        ax.set_title(CHANNEL_LABELS[c], color=th["ink"], fontsize=10,
+                     loc="left", pad=6)
+        _style_axes(ax, th)
+
+    axes[-1].set_xlabel("time [s]", color=th["muted"], fontsize=9)
+    fig.suptitle(f"{path.name} — {side} arm", color=th["ink"],
+                 fontsize=11, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120)
+    fig.savefig(buf, format="png", dpi=140, facecolor=th["surface"])
     plt.close(fig)
     return Response(buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/sessions/{name}/distribution.png")
+async def session_distribution(name: str, side: str = Query("right"),
+                               theme: str = Query("light")) -> Response:
+    """
+    Distribution of each joint angle over a recorded session.
+
+    Where the time series answers "what did the arm do", this answers "what
+    range did it cover and where did it dwell" — the view that matters when the
+    log is used as a reference signal for calibrating another sensor.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = _resolve_session(name)
+    if side not in ("right", "left"):
+        raise HTTPException(400, "side must be 'right' or 'left'")
+    th = PLOT_THEMES.get(theme, PLOT_THEMES["light"])
+
+    _, series = _read_session_series(path, side)
+    clean = {c: [v for v in vals if v == v] for c, vals in series.items()}
+    if not any(clean.values()):
+        raise HTTPException(422, "Session log contains no tracked frames for this arm.")
+
+    fig, axes = plt.subplots(1, 4, figsize=(11, 2.8), facecolor=th["surface"])
+    for ax, c in zip(axes, CHANNELS):
+        vals = clean[c]
+        if vals:
+            counts, _, _ = ax.hist(vals, bins=24, color=th["series"][0],
+                                   edgecolor=th["panel"], linewidth=0.8)
+            # Reserve a band above the tallest bar for the mean label, so the
+            # annotation can never overlap the data it describes.
+            ax.set_ylim(0, max(counts.max(), 1) * 1.3)
+            mean = sum(vals) / len(vals)
+            ax.axvline(mean, color=th["series"][1], linewidth=1.6)
+            # One direct label beats a legend for a single annotated line.
+            # It is anchored to the top of the axes (data x, axes y) so it can
+            # never sit on top of a bar, and flips to the other side of the
+            # line when the mean falls near the right edge.
+            lo, hi = min(vals), max(vals)
+            near_right = hi > lo and (mean - lo) / (hi - lo) > 0.65
+            ax.annotate(
+                f"mean {mean:.1f}°",
+                xy=(mean, 1.0), xycoords=ax.get_xaxis_transform(),
+                xytext=(-5 if near_right else 5, -4), textcoords="offset points",
+                color=th["series"][1], fontsize=8, va="top",
+                ha="right" if near_right else "left",
+            )
+        else:
+            ax.text(0.5, 0.5, "not tracked", transform=ax.transAxes,
+                    ha="center", va="center", color=th["muted"], fontsize=9)
+        ax.set_title(CHANNEL_LABELS[c], color=th["ink"], fontsize=9,
+                     loc="left", pad=6)
+        ax.set_xlabel("deg", color=th["muted"], fontsize=8)
+        _style_axes(ax, th)
+
+    fig.suptitle(f"{path.name} — {side} arm, angle distribution",
+                 color=th["ink"], fontsize=11, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, facecolor=th["surface"])
+    plt.close(fig)
+    return Response(buf.getvalue(), media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Generated figures
+# ---------------------------------------------------------------------------
+
+def _describe_figure(path: Path) -> tuple[str, str]:
+    """Match a figure file to the script that generates it."""
+    stem = path.stem.lower()
+    for key, (script, description) in FIGURE_PROVENANCE.items():
+        if key in stem:
+            return script, description
+    return "", ""
+
+
+@app.get("/api/figures")
+async def list_figures() -> dict:
+    """
+    Every figure the project's own analysis scripts have produced.
+
+    The gallery reports what is on disk. If a root is empty the response says
+    so and names the script that would populate it, rather than showing a
+    placeholder that implies an analysis was run.
+    """
+    groups = []
+    for root_key, root in FIGURE_ROOTS.items():
+        items = []
+        if root.exists():
+            for path in sorted(root.rglob("*")):
+                if path.suffix.lower() not in FIGURE_SUFFIXES or not path.is_file():
+                    continue
+                rel = path.relative_to(root)
+                script, description = _describe_figure(path)
+                items.append({
+                    "id":          f"{root_key}/{rel.as_posix()}",
+                    "name":        path.stem.replace("_", " "),
+                    "filename":    path.name,
+                    "relative":    rel.as_posix(),
+                    "size_bytes":  path.stat().st_size,
+                    "modified":    path.stat().st_mtime,
+                    "generated_by": script,
+                    "description": description,
+                })
+        groups.append({
+            "key":     root_key,
+            "path":    str(root),
+            "exists":  root.exists(),
+            "figures": items,
+        })
+    return {"groups": groups}
+
+
+@app.get("/api/figures/{root_key}/{rel_path:path}")
+async def get_figure(root_key: str, rel_path: str) -> FileResponse:
+    """Serve one figure, refusing any path that escapes its root."""
+    root = FIGURE_ROOTS.get(root_key)
+    if root is None:
+        raise HTTPException(404, f"Unknown figure root '{root_key}'.")
+    base = root.resolve()
+    path = (base / rel_path).resolve()
+    if base != path and base not in path.parents:
+        raise HTTPException(404, "Figure not found.")
+    if not path.is_file() or path.suffix.lower() not in FIGURE_SUFFIXES:
+        raise HTTPException(404, "Figure not found.")
+    return FileResponse(path, media_type=FIGURE_MEDIA.get(path.suffix.lower(),
+                                                          "application/octet-stream"))
 
 
 # ---------------------------------------------------------------------------

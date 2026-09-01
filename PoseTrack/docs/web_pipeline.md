@@ -144,6 +144,58 @@ Destination, rate, packet and error counters, the literal text of the most
 recent packet and a short history. Host, port and rate can be changed while
 running.
 
+### Generated figures
+The plots this project's own analysis scripts write to disk — the evaluation
+figures, filter and framework comparisons, occlusion and latency benchmarks.
+Click one to enlarge; each card names the script that produced it.
+
+The gallery only reports what exists. It generates nothing, so an empty section
+means those scripts have not been run yet rather than a placeholder standing in
+for an analysis that never happened.
+
+### Expandable explanations
+Every card carries an **Explain** disclosure. Opening it describes what that
+panel measures, how, and where the numbers come from — the angle definitions and
+their formulas, what each pipeline stage times, what each filter trades off, why
+a calibration pose can be rejected, and the packet formats. The content is
+rendered from `/api/explain`, which is generated from `webapp/explain.py`, so the
+explanation and the implementation cannot drift apart.
+
+---
+
+## 4a. Theme and colour
+
+A theme toggle in the top bar switches the dashboard between light and dark. The
+choice is stored in `localStorage` and applied before first paint, so reloading
+never flashes the other theme; with nothing stored the page follows the operating
+system's `prefers-color-scheme`.
+
+The palette is the project's three brand colours — ink black `#011627`, porcelain
+`#fdfffc`, light sea green `#2ec4b6`.
+
+Chart series colours are **not** the raw brand hex. Each mode has its own stepped
+set, validated against that mode's surface for lightness band, chroma floor,
+colour-vision separation under protanopia and deuteranopia, a normal-vision
+separation floor, and contrast:
+
+| Series | Light (on porcelain) | Dark (on ink black) |
+|---|---|---|
+| Kalman | `#1f9e93` | `#26a396` |
+| Moving average | `#cf6c25` | `#cd7734` |
+| Savitzky–Golay | `#6d4fd1` | `#8f78dd` |
+| Raw reference | `#8b9aa8` | `#5d7288` |
+
+`#2ec4b6` itself fails two of those checks — the dark-mode lightness band and the
+3:1 contrast floor on porcelain — so it is used for interface chrome (the active
+nav item, the highlighted stat tile, buttons) rather than for data marks. Series
+colours are read from CSS custom properties at draw time, so the charts follow
+the theme without a reload, and the server-rendered session plots are
+re-requested with a `theme` parameter so a downloaded figure matches the screen.
+
+Colour never carries identity alone: every multi-series chart has a legend, the
+current value of each trace is directly labelled, and the filter comparison table
+states the same numbers in text.
+
 ---
 
 ## 5. Calibration
@@ -200,7 +252,10 @@ path is a WebSocket.
 | `GET` | `/api/sessions` | list recorded sessions |
 | `GET` | `/api/sessions/{name}` | download a session CSV |
 | `GET` | `/api/sessions/{name}/summary` | statistics computed from that CSV |
-| `GET` | `/api/sessions/{name}/plot.png?side=right` | time-series figure |
+| `GET` | `/api/sessions/{name}/plot.png?side=right&theme=light` | time-series figure |
+| `GET` | `/api/sessions/{name}/distribution.png?side=right&theme=light` | angle distribution figure |
+| `GET` | `/api/figures` | figures the analysis scripts have written to disk |
+| `GET` | `/api/figures/{root}/{path}` | serve one figure |
 | `GET` | `/api/sources` | cameras and videos visible to the server |
 | `POST` | `/api/source` | select browser / camera / file |
 | `GET` | `/api/preview.mjpg` | annotated preview of a server-side source |
