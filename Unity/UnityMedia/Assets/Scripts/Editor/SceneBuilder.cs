@@ -148,7 +148,8 @@ namespace MonoArm
         static void CollapseToSingleAvatar()
         {
             // Keep exactly one humanoid Animator; destroy the rest.
-            var humanoids = Object.FindObjectsOfType<Animator>(true)
+            var humanoids = Object.FindObjectsByType<Animator>(
+                    FindObjectsInactive.Include, FindObjectsSortMode.InstanceID)
                 .Where(a => a != null && a.isHuman && a.gameObject.scene.IsValid())
                 .Select(a => a.gameObject)
                 .Distinct()
@@ -178,7 +179,8 @@ namespace MonoArm
             // Destroy comparison-view overlays: root Canvas objects and any
             // "Label_*" objects (per-framework text overlays), plus stray
             // duplicates of "New Text".
-            foreach (var c in Object.FindObjectsOfType<Canvas>(true))
+            foreach (var c in Object.FindObjectsByType<Canvas>(
+                         FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (c == null || !c.gameObject.scene.IsValid()) continue;
                 if (c.transform.parent != null) continue; // leave avatar-parented UI (e.g. PoseDebugUI) alone
@@ -186,7 +188,8 @@ namespace MonoArm
                 Undo.DestroyObjectImmediate(c.gameObject);
             }
 
-            foreach (var t in Object.FindObjectsOfType<Transform>(true))
+            foreach (var t in Object.FindObjectsByType<Transform>(
+                         FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (t == null || t.parent != null) continue; // root objects only
                 if (!t.gameObject.scene.IsValid()) continue;
@@ -212,27 +215,47 @@ namespace MonoArm
         {
             var sb = new System.Text.StringBuilder();
 
-            var receivers = Object.FindObjectsOfType<UdpAngleReceiver>();
+            var receivers = Object.FindObjectsByType<UdpAngleReceiver>(FindObjectsSortMode.InstanceID);
             sb.AppendLine($"UdpAngleReceiver count: {receivers.Length}  (should be 1)");
             foreach (var r in receivers)
                 sb.AppendLine($"  → on '{r.gameObject.name}' port={r.listenPort}");
 
             sb.AppendLine();
 
-            var managers = Object.FindObjectsOfType<MonoArmManager>();
+            var managers = Object.FindObjectsByType<MonoArmManager>(FindObjectsSortMode.InstanceID);
             sb.AppendLine($"MonoArmManager count: {managers.Length}  (should be 1)");
             foreach (var m in managers)
             {
-                sb.AppendLine($"  receiver linked:   {m.receiver != null}");
-                sb.AppendLine($"  controller linked: {m.avatarController != null}");
+                bool anyController = m.avatarController != null || m.leftArmController != null ||
+                                     m.boneControllerRight != null || m.boneControllerLeft != null;
+                sb.AppendLine($"  receiver linked:     {m.receiver != null}");
+                sb.AppendLine($"  controller linked:   {anyController}");
+                sb.AppendLine($"    muscle right/left: {m.avatarController != null} / {m.leftArmController != null}");
+                sb.AppendLine($"    bone   right/left: {m.boneControllerRight != null} / {m.boneControllerLeft != null}");
             }
 
             sb.AppendLine();
 
-            var ctrls = Object.FindObjectsOfType<AvatarMuscleController>();
-            sb.AppendLine($"AvatarMuscleController count: {ctrls.Length}  (should be 1)");
-            foreach (var c in ctrls)
-                sb.AppendLine($"  → on '{c.gameObject.name}'  enabled={c.enabled}");
+            // Either controller type is valid: the scene needs at least one per
+            // tracked arm, and never both on the same avatar, because they would
+            // write the same bones every frame.
+            var muscleCtrls = Object.FindObjectsByType<AvatarMuscleController>(FindObjectsSortMode.InstanceID);
+            var boneCtrls   = Object.FindObjectsByType<ArmBoneController>(FindObjectsSortMode.InstanceID);
+
+            sb.AppendLine($"Arm controllers: {muscleCtrls.Length} muscle-space, {boneCtrls.Length} direct-bone");
+            foreach (var c in muscleCtrls)
+                sb.AppendLine($"  → AvatarMuscleController ({c.side}) on '{c.gameObject.name}'  enabled={c.enabled}");
+            foreach (var c in boneCtrls)
+                sb.AppendLine($"  → ArmBoneController ({c.side}) on '{c.gameObject.name}'  enabled={c.enabled}");
+
+            if (muscleCtrls.Length + boneCtrls.Length == 0)
+                sb.AppendLine("  !! No arm controller in the scene — the avatar will not move.");
+
+            foreach (var bone in boneCtrls)
+                foreach (var muscle in muscleCtrls)
+                    if (bone.gameObject == muscle.gameObject)
+                        sb.AppendLine($"  !! '{bone.gameObject.name}' has BOTH controller types — " +
+                                      "remove one, they fight over the same bones.");
 
             Debug.Log("[MonoArm Diagnose]\n" + sb);
             EditorUtility.DisplayDialog("MonoArm Scene Diagnosis", sb.ToString(), "OK");
@@ -251,7 +274,7 @@ namespace MonoArm
 
         static GameObject FindHumanoidInScene()
         {
-            foreach (var anim in Object.FindObjectsOfType<Animator>())
+            foreach (var anim in Object.FindObjectsByType<Animator>(FindObjectsSortMode.InstanceID))
                 if (anim.isHuman && anim.gameObject.scene.IsValid())
                     return anim.gameObject;
             return null;
