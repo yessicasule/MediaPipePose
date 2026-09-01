@@ -130,9 +130,9 @@ namespace MonoArm
                 "Next steps:\n" +
                 "1. Save the scene (Ctrl+S)\n" +
                 "2. Run the Python pipeline:\n" +
-                "   python scripts/run_demo.py\n" +
+                "   python -m scripts.run_demo\n" +
                 "   -- or for testing without camera --\n" +
-                "   python scripts/mock_streamer.py --mode sinusoidal\n" +
+                "   python -m scripts.data_generator --mode sinusoidal\n" +
                 "3. Press Play in Unity.",
                 "OK");
         }
