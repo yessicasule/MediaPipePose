@@ -7,7 +7,7 @@ name = "posetrack"
 version = "0.1.0"
 description = "PoseTrack: Monocular Arm Motion Tracking"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "mediapipe>=0.10.9",
     "opencv-python>=4.8.1",
@@ -20,7 +20,11 @@ dependencies = [
     "tensorflow-hub>=0.15",
     "torch>=2.0.0",
     "pyyaml",
-    "scipy"
+    "scipy",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "websockets>=12.0",
+    "python-multipart>=0.0.9"
 ]
 
 [tool.setuptools]
@@ -28,4 +32,4 @@ package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "config*"]
+include = ["src*", "config*", "webapp*"]

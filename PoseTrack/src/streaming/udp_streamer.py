@@ -37,6 +37,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from collections import deque
 
 from ..processing.angle_solver import ArmAngles, BilateralArmAngles
 
@@ -84,6 +85,14 @@ class UdpAngleSender:
         self._send_errors    = 0
         self._last_log_t     = 0.0
         self._last_log_count = 0
+
+        # Wire inspection: the exact text of the most recently transmitted
+        # packet, its send time, and a short rolling history. Consumed by the
+        # web dashboard's packet inspector so the operator can see the bytes
+        # Unity actually receives.
+        self._last_packet    = ""
+        self._last_packet_t  = 0.0
+        self._packet_history = deque(maxlen=32)
 
         # Current angle values (degrees): right arm
         self._flex: float = 0.0
@@ -167,6 +176,44 @@ class UdpAngleSender:
         """Number of packets that failed at the OS send call."""
         return self._send_errors
 
+    @property
+    def destination(self) -> tuple[str, int]:
+        """(host, port) the packets are addressed to."""
+        return self._addr
+
+    @property
+    def target_hz(self) -> float:
+        """Configured transmission rate in Hz."""
+        return 1.0 / self._interval
+
+    @property
+    def running(self) -> bool:
+        """True while the background send loop is active."""
+        return self._running
+
+    def wire_state(self) -> dict:
+        """
+        Snapshot of the transmit side for UI/telemetry.
+
+        Returns the destination, packet counters and the literal text of the
+        most recent packets, so a consumer can verify byte-for-byte what the
+        Unity receiver is being sent.
+        """
+        with self._lock:
+            history = list(self._packet_history)
+        return {
+            "host":          self._addr[0],
+            "port":          self._addr[1],
+            "running":       self._running,
+            "target_hz":     round(self.target_hz, 2),
+            "packets_sent":  self._packets_sent,
+            "send_errors":   self._send_errors,
+            "bilateral":     self._bilateral,
+            "last_packet":   self._last_packet,
+            "last_packet_t": self._last_packet_t,
+            "history":       [{"t": t, "packet": p} for t, p in history[-8:]],
+        }
+
     def send_now(self, angles: ArmAngles) -> None:
         """
         Send a single packet immediately (bypasses the background thread).
@@ -202,6 +249,10 @@ class UdpAngleSender:
             try:
                 self._sock.sendto(msg, self._addr)
                 self._packets_sent += 1
+                text = msg.decode("utf-8").strip()
+                self._last_packet   = text
+                self._last_packet_t = time.time()
+                self._packet_history.append((self._last_packet_t, text))
             except OSError as e:
                 self._send_errors += 1
                 print(f"\n[UDP TX ERROR] send to {self._addr[0]}:{self._addr[1]} "

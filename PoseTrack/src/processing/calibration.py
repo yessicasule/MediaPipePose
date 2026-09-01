@@ -63,6 +63,18 @@ POSE_ELBOW_BENT  = "elbow_bent"
 
 REQUIRED_POSES   = [POSE_ARM_DOWN, POSE_ARM_FORWARD, POSE_ARM_SIDE, POSE_ELBOW_BENT]
 
+# A reference pose is only usable if the measured angle moved far enough away
+# from the neutral (arm_down) reading. Below this span the ratio
+# expected/measured is dominated by noise and produces an enormous scale that
+# would send wildly wrong angles to the avatar, so the degree of freedom is
+# left uncalibrated instead.
+MIN_REFERENCE_SPAN_DEG = 20.0
+
+# Plausible bounds on a per-DOF gain. A vision estimate that needs more than a
+# 4x correction indicates the reference pose was performed or tracked badly,
+# not that the subject's anatomy differs by that much.
+SCALE_LIMITS = (0.25, 4.0)
+
 # Expected angles at each reference pose (degrees, anatomical ground truth)
 EXPECTED_ANGLES = {
     POSE_ARM_DOWN:    ArmAngles(shoulder_flexion=0,  shoulder_abduction=0,  shoulder_rotation=0,  elbow_flexion=0,  rotation_reliable=False),
@@ -136,6 +148,9 @@ class CalibrationManager:
 
     def __init__(self) -> None:
         self.data = CalibrationData()
+        # Populated by finalise(): human-readable problems found while fitting
+        # the reference poses. Empty means every axis was calibrated cleanly.
+        self.warnings: list[str] = []
         self._reference_captures: dict[str, ArmAngles] = {}
         self._sweep_samples: dict[str, list[float]] = {
             "flexion": [], "abduction": [], "rotation": [], "elbow": [],
@@ -186,24 +201,65 @@ class CalibrationManager:
                 rotation_reliable  = angles.rotation_reliable,
             )
 
+    @staticmethod
+    def _fit_scale(
+        span_raw: float,
+        expected_deg: float,
+        dof_name: str,
+        warnings: list[str],
+    ) -> float:
+        """
+        Fit the gain that maps a measured reference span onto its anatomical
+        value, refusing fits that the measurement cannot support.
+
+        Returns 1.0 (no scaling) when the reference pose was too close to
+        neutral to be distinguishable, and clamps the gain to SCALE_LIMITS
+        otherwise. Every rejection or clamp is recorded in ``warnings`` so the
+        operator is told which pose to repeat rather than silently receiving a
+        broken mapping.
+        """
+        if abs(span_raw) < MIN_REFERENCE_SPAN_DEG:
+            warnings.append(
+                f"{dof_name}: reference pose differed from neutral by only "
+                f"{span_raw:+.1f}deg (at least {MIN_REFERENCE_SPAN_DEG:.0f}deg needed) "
+                f"- this axis was left uncalibrated. Repeat the pose more distinctly."
+            )
+            return 1.0
+
+        scale = expected_deg / span_raw
+        lo, hi = SCALE_LIMITS
+        if not (lo <= scale <= hi):
+            clamped = min(max(scale, lo), hi)
+            warnings.append(
+                f"{dof_name}: fitted gain {scale:.2f} is outside the plausible "
+                f"range {lo}-{hi} and was clamped to {clamped:.2f}. "
+                f"Check that the reference pose was held correctly."
+            )
+            return clamped
+        return scale
+
     def finalise(self) -> None:
         """
         Compute calibration parameters from the captured reference poses.
 
-        For each DOF, the offset zeroes the arm_down reading, and the
-        scale maps the observed range to the expected anatomical range.
+        For each DOF the offset zeroes the arm_down reading and the scale maps
+        the observed span onto the expected anatomical value. Degrees of
+        freedom whose reference pose was not sufficiently distinct from
+        neutral keep a unit scale and are reported in :attr:`warnings`.
         """
         if POSE_ARM_DOWN not in self._reference_captures:
             raise RuntimeError("arm_down pose must be captured before finalising.")
 
         down = self._reference_captures[POSE_ARM_DOWN]
+        self.warnings = []
 
         # Flexion: arm_down = 0°, arm_forward = 90°
         self.data.flexion.offset = -down.shoulder_flexion
         if POSE_ARM_FORWARD in self._reference_captures:
             fwd_raw = (self._reference_captures[POSE_ARM_FORWARD].shoulder_flexion
                        + self.data.flexion.offset)
-            self.data.flexion.scale = 90.0 / fwd_raw if abs(fwd_raw) > 1e-3 else 1.0
+            self.data.flexion.scale = self._fit_scale(
+                fwd_raw, 90.0, "shoulder flexion (arm_forward)", self.warnings)
         self.data.flexion.min_raw = down.shoulder_flexion - 30
         self.data.flexion.max_raw = self._reference_captures.get(
             POSE_ARM_FORWARD, down).shoulder_flexion + 10
@@ -213,7 +269,8 @@ class CalibrationManager:
         if POSE_ARM_SIDE in self._reference_captures:
             side_raw = (self._reference_captures[POSE_ARM_SIDE].shoulder_abduction
                         + self.data.abduction.offset)
-            self.data.abduction.scale = 90.0 / side_raw if abs(side_raw) > 1e-3 else 1.0
+            self.data.abduction.scale = self._fit_scale(
+                side_raw, 90.0, "shoulder abduction (arm_side)", self.warnings)
         self.data.abduction.min_raw = down.shoulder_abduction - 15
         self.data.abduction.max_raw = self._reference_captures.get(
             POSE_ARM_SIDE, down).shoulder_abduction + 10
@@ -227,7 +284,8 @@ class CalibrationManager:
         if POSE_ELBOW_BENT in self._reference_captures:
             bent_raw = (self._reference_captures[POSE_ELBOW_BENT].elbow_flexion
                         + self.data.elbow.offset)
-            self.data.elbow.scale = 90.0 / bent_raw if abs(bent_raw) > 1e-3 else 1.0
+            self.data.elbow.scale = self._fit_scale(
+                bent_raw, 90.0, "elbow flexion (elbow_bent)", self.warnings)
         self.data.elbow.min_raw = down.elbow_flexion - 5
         self.data.elbow.max_raw = self._reference_captures.get(
             POSE_ELBOW_BENT, down).elbow_flexion + 10

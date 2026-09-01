@@ -15,6 +15,12 @@ scipy
 # Structured result export (Excel workbooks)
 openpyxl>=3.1
 
+# Web dashboard (scripts/run_web.py): HTTP control plane + WebSocket data plane
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+python-multipart>=0.0.9
+
 # TensorFlow for MoveNet
 tensorflow>=2.14
 tensorflow-hub>=0.15

@@ -102,6 +102,11 @@ class MediaPipeRunner(PoseEstimator):
     ) -> None:
         self._use_tasks   = False
         self._start_time  = time.perf_counter()
+        # Tasks API VIDEO mode rejects a timestamp that is not strictly
+        # greater than the previous one. At high frame rates two frames can
+        # round to the same millisecond, so the last value is remembered and
+        # the next timestamp is nudged forward when that happens.
+        self._last_ts_ms  = -1
 
         try:
             self._init_solutions(detection_confidence, tracking_confidence, model_complexity)
@@ -173,8 +178,11 @@ class MediaPipeRunner(PoseEstimator):
     def _process_tasks(self, image_rgb: np.ndarray) -> list[Landmark] | None:
         import mediapipe as mp
 
-        # Use real elapsed time for timestamp (fixes the hardcoded +33ms bug)
+        # Use real elapsed time for the timestamp, forced strictly increasing
         ts_ms = int((time.perf_counter() - self._start_time) * 1000)
+        if ts_ms <= self._last_ts_ms:
+            ts_ms = self._last_ts_ms + 1
+        self._last_ts_ms = ts_ms
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
         result = self.pose.detect_for_video(mp_img, ts_ms)
 

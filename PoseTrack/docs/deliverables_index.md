@@ -1,95 +1,160 @@
 # MonoArm — Deliverables Index
-Generated: 2026-07-08 17:33:21
 
-## Required Deliverables
+Maps each deliverable in the project specification to the code that implements
+it. "Present" means the code is in the repository and exercised by the test
+suite or by a documented command; artefacts that must be produced by running the
+system on hardware with a camera are marked as such rather than claimed.
 
-| # | Deliverable | Status | Path |
-|---|-------------|--------|------|
-| 1 | Real-time vision-based arm tracking application | ✅ Complete | `scripts/run_demo.py` |
-| 2 | Joint angle estimation and filtering module | ✅ Complete | `src/processing/angle_solver.py`, `angle_filter.py` |
-| 3 | Unity application with avatar arm control | ✅ Complete | `Unity/UnityMedia/Assets/Scripts/*.cs` |
-| 4 | Calibration module | ✅ Complete | `src/processing/calibration.py` |
-| 5 | Joint angle data logging tools | ✅ Complete | `src/processing/angle_logger.py`, `scripts/plot_angles.py` |
-| 6 | Technical documentation | ✅ Complete | `docs/technical_report.md` |
-| 7 | Video demonstration | ✅ Complete | `outputs/demo_video.mp4` |
+---
 
-## All Output Files
+## Required deliverables
 
-### Core Application
+| # | Deliverable | State | Where |
+|---|---|---|---|
+| 1 | Real-time vision-based arm tracking application | Present | `scripts/run_web.py` (browser dashboard), `scripts/run_demo.py` (OpenCV window) |
+| 2 | Joint angle estimation and filtering module | Present | `src/processing/angle_solver.py`, `coordinate_frame.py`, `angle_filter.py` |
+| 3 | Unity application with avatar arm control | Present | `Unity/UnityMedia/Assets/Scripts/` |
+| 4 | Calibration module | Present | `src/processing/calibration.py`, dashboard calibration panel |
+| 5 | Joint angle data logging and visualisation tools | Present | `src/processing/angle_logger.py`, `scripts/plot_angles.py`, dashboard session browser |
+| 6 | Technical documentation | Present | `docs/technical_report.md`, `docs/web_pipeline.md`, `README.md` |
+| 7 | Video recordings of system operation | **Produced by running the system** | `scripts/record_demo.py`, `scripts/run_capture_session.py` — requires a camera; recordings are not stored in the repository |
+
+---
+
+## Optional extensions from the specification
+
+| Extension | State | Where |
+|---|---|---|
+| Gesture recognition from arm motion | Present | `src/processing/gesture_recognizer.py` — five classes, reported on every dashboard frame |
+| Exoskeleton calibration/validation interface | Present | `src/streaming/exoskeleton_streamer.py` — per-joint JSON with `APPLY`/`HOLD` gating on port 9001 |
+| Pretrained 2D-to-3D lifting for better shoulder angles | **Research code, no trained weights** | `src/models/fusion_network.py`, `baseline_models.py`, `gan_refinery.py` — training must be run separately; not used by the live pipeline |
+| VR / AR integration | Not implemented | — |
+
+---
+
+## Web dashboard (front-end + back-end)
+
 | File | Description |
-|------|-------------|
-| `scripts/run_demo.py` | **Main entry point** — full live pipeline |
-| `src/main.py` | Headless-friendly alternative pipeline |
-| `scripts/run_capture_session.py` | Session recorder with video + CSV |
-| `scripts/mock_streamer.py` | Unity test without webcam |
+|---|---|
+| `webapp/server.py` | FastAPI app: REST control plane, WebSocket data plane, session browser, MJPEG preview |
+| `webapp/pipeline.py` | per-frame orchestration: pose → angles → all filters → calibration → UDP → log, with per-stage timing and a derivation trace |
+| `webapp/metrics.py` | rolling latency, throughput, angle stability and keypoint jitter statistics |
+| `webapp/explain.py` | description of every reported quantity, served to the UI at `/api/explain` |
+| `webapp/sources.py` | browser / server-camera / recorded-video frame sources |
+| `webapp/static/index.html`, `app.js`, `style.css` | the dashboard, with no external assets |
+| `scripts/run_web.py` | launcher |
 
-### Joint Angle Estimation
+---
+
+## Core application
+
 | File | Description |
-|------|-------------|
-| `src/processing/angle_solver.py` | ISB ZXY Euler 4-DOF solver |
-| `src/processing/coordinate_frame.py` | Torso reference frame builder |
-| `src/processing/angle_filter.py` | Kalman, MA, SG, EMA filters |
-| `src/processing/calibration.py` | 3-tier calibration pipeline |
+|---|---|
+| `scripts/run_web.py` | **primary entry point** — dashboard and Unity stream together |
+| `scripts/run_demo.py` | OpenCV desktop version of the live pipeline |
+| `src/main.py` | headless-friendly alternative pipeline |
+| `scripts/run_capture_session.py` | session recorder producing video plus CSV |
+| `scripts/mock_streamer.py` | drives Unity with generated angles to test the rig without a camera |
 
-### Unity Integration (6 C# scripts)
+---
+
+## Joint angle estimation
+
 | File | Description |
-|------|-------------|
-| `UdpAngleReceiver.cs` | Threaded UDP receiver, parses `S,` packets |
-| `ArmAngleController.cs` (`AvatarMuscleController`) | HumanPoseHandler muscle-space controller |
-| `MultiAvatarManager.cs` (`MonoArmManager`) | Wires receiver→controller |
-| `PoseDebugUI.cs` | World-space live angle HUD under avatar |
-| `AngleSmoother.cs` | Per-channel SmoothDampAngle helper |
-| `Editor/SceneBuilder.cs` | **MonoArm > Build Scene** auto-setup |
+|---|---|
+| `src/processing/coordinate_frame.py` | torso reference frame, Gram–Schmidt orthonormalised |
+| `src/processing/angle_solver.py` | ZXY decomposition, bilateral four-DOF solver, rotation-observability flag |
+| `src/processing/angle_filter.py` | `KalmanFilter2State`, `MovingAverageFilter`, `SavitzkyGolayFilter`, and per-side filter banks |
+| `src/processing/calibration.py` | reference-pose calibration with span and gain validation |
+| `src/processing/gesture_recognizer.py` | rule-based gesture classification |
 
-### Logging & Visualization
+---
+
+## Pose estimation frameworks
+
 | File | Description |
-|------|-------------|
-| `src/processing/angle_logger.py` | CSV logger + rolling live plot |
-| `scripts/plot_angles.py` | Post-session 4-panel matplotlib figure |
-| `scripts/compare_filters.py` | Filter comparison benchmark |
+|---|---|
+| `src/pose/base.py` | common `PoseEstimator` interface and 33-keypoint landmark schema |
+| `src/pose/mediapipe_runner.py` | MediaPipe Pose (Solutions API, falling back to the Tasks API) |
+| `src/pose/movenet_runner.py` | MoveNet Lightning / Thunder |
+| `src/pose/posenet_runner.py` | PoseNet |
+| `scripts/compare_frameworks.py`, `benchmarks/` | side-by-side comparison on identical input |
 
-### Evaluation & Benchmarking
+---
+
+## Unity integration
+
 | File | Description |
-|------|-------------|
-| `src/evaluation/metrics.py` | MAE/RMSE/MPJAE/PCK/Jitter |
-| `src/evaluation/eval_plots.py` | 5 publication-quality figures |
-| `src/evaluation/occlusion_test.py` | Robustness benchmark |
-| `scripts/evaluate_h36m.py` | H3.6M ground-truth validation |
-| `scripts/benchmark_latency.py` | Per-component latency profiling |
-| `scripts/run_experiments.py` | Unified experiment orchestrator |
+|---|---|
+| `UdpAngleReceiver.cs` | threaded UDP receiver, parses `S,` and `B,` packets |
+| `ArmBoneController.cs` | direct bone control via `Transform.localRotation` and `Quaternion.Euler`, frame-rate-independent interpolation |
+| `ArmAngleController.cs` (`AvatarMuscleController`) | humanoid muscle-space controller via `HumanPoseHandler` |
+| `MultiAvatarManager.cs` (`MonoArmManager`) | wires the receiver to whichever controllers are in the scene |
+| `AngleSmoother.cs` | per-channel `SmoothDampAngle` helper |
+| `PoseDebugUI.cs` | world-space live angle HUD |
+| `Editor/SceneBuilder.cs` | **MonoArm → Build Scene / Diagnose Scene / Undo Last Build** |
 
-### Generated Outputs
+---
+
+## Logging, visualisation and evaluation
+
 | File | Description |
-|------|-------------|
-| `outputs/benchmarks/arm_test_01/plots/benchmark_dashboard.png` | FPS/latency dashboard |
-| `outputs/benchmarks/arm_test_01/plots/accuracy_comparison.png` | Accuracy charts |
-| `outputs/filter_comparison.png` | Filter benchmark (generated) |
-| `outputs/experiments/` | Evaluation metrics JSON + plots |
-| `outputs/demo_video.mp4` | System demonstration video |
-| `outputs/unified_dataset.csv` | 78 MB training dataset |
-| `outputs/models/bilstm_baseline_mp.pt` | Trained BiLSTM checkpoint |
+|---|---|
+| `src/processing/angle_logger.py` | CSV loggers (single and bilateral) plus a rolling live plot |
+| `scripts/plot_angles.py` | four-panel time-series figure from a session CSV |
+| `scripts/compare_filters.py` | offline filter comparison |
+| `scripts/benchmark_latency.py` | per-component latency profile |
+| `src/evaluation/metrics.py` | MAE, RMSE, MPJAE, PCK, jitter |
+| `src/evaluation/statistics.py` | paired significance tests and effect sizes |
+| `src/evaluation/eval_plots.py` | publication-format figures |
+| `src/evaluation/occlusion_test.py` | occlusion robustness benchmark |
+| `src/evaluation/ablation.py` | ablation harness |
+| `scripts/evaluate_h36m.py`, `scripts/evaluate_panoptic.py` | ground-truth validation against public datasets (datasets not bundled) |
 
-## How to Run
+---
+
+## Tests
 
 ```bash
-# Live arm tracking (requires webcam)
-python scripts/run_demo.py --filter kalman
-
-# Test Unity without webcam
-python scripts/mock_streamer.py --mode sinusoidal
-
-# Full deliverables generation (headless)
-python scripts/generate_deliverables.py
-
-# Run unit tests
-python -m pytest tests/ -v
+python -m pytest tests/ -q
 ```
 
-## Unity Scene Setup
+| File | Covers |
+|---|---|
+| `tests/test_webapp.py` | metrics, calibration guards, pipeline on a real photograph, HTTP endpoints, WebSocket data plane |
+| `tests/test_pose_estimators.py` | estimator interface and landmark schema |
+| `tests/test_evaluation.py` | metrics and statistics |
+| `tests/test_refactored.py` | fusion model shapes — requires PyTorch |
 
-1. Open `Unity/UnityMedia/` in Unity 2022+
-2. Open `Assets/HumanoidScene1.unity`
-3. Menu: **MonoArm → Build Scene**
-4. Press Ctrl+S
-5. Start Python: `python scripts/run_demo.py`
-6. Press Play in Unity
+---
+
+## How to run
+
+```bash
+# Web dashboard + live Unity stream (needs a camera)
+python scripts/run_web.py
+
+# OpenCV desktop pipeline
+python scripts/run_demo.py --filter kalman
+
+# Drive Unity without a camera, to check the avatar rig
+python scripts/mock_streamer.py --mode sinusoidal
+
+# Latency profile for this machine
+python scripts/benchmark_latency.py --frames 300
+
+# Tests
+python -m pytest tests/ -q
+```
+
+## Unity scene setup
+
+1. Open `Unity/UnityMedia/` in Unity 2022 or newer.
+2. Open `Assets/HumanoidScene1.unity`.
+3. Menu → **MonoArm → Build Scene**, then save.
+4. Start the Python side (`scripts/run_web.py`).
+5. Press Play.
+
+Outputs are written under `outputs/` (git-ignored): `outputs/web/logs/` for
+dashboard sessions, `outputs/web/calibration_<side>.json` for calibration
+parameters.
