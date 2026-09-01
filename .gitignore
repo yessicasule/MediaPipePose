@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Generated outputs (regenerate via scripts/*)
+python/outputs/
+python/data/
+python/.venv/
+
+# Unity
+unity/UnityMedia/Library/
+unity/UnityMedia/Temp/
+unity/UnityMedia/Obj/
+unity/UnityMedia/Build/
+unity/UnityMedia/Builds/
+unity/UnityMedia/Logs/
+unity/UnityMedia/UserSettings/
