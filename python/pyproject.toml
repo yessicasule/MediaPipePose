@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monoarm"
+version = "0.1.0"
+description = "MonoArm: Monocular Vision-Based Estimation of Human Arm Joint Angles for Real-Time Digital Avatar Control"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "mediapipe>=0.10.9",
+    "opencv-python>=4.8.1",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "psutil>=5.9",
+    "Pillow>=10.0",
+    "tensorflow>=2.14",
+    "tensorflow-hub>=0.15",
+    "torch>=2.0.0",
+    "pyyaml",
+    "scipy"
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "config*"]
