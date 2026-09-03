@@ -1,106 +1,19 @@
-# ── Python ────────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-
-# virtual environments
+*.pyc
 .venv/
-venv/
-env/
-ENV/
-.env
-.env.*
-
-# build / packaging
-build/
-dist/
 *.egg-info/
-.eggs/
-pip-log.txt
-pip-delete-this-directory.txt
-MANIFEST
 
-# test / lint caches
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
-.tox/
-.nox/
-.ruff_cache/
+# Generated outputs (regenerate via scripts/*)
+python/outputs/
+python/data/
+python/.venv/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# ── Node / npm ─────────────────────────────────────────────────────────────────
-node_modules/
-package-lock.json
-yarn.lock
-.npm/
-.yarn/
-*.tsbuildinfo
-
-# ── TensorFlow / ML ───────────────────────────────────────────────────────────
-*.h5
-*.pb
-*.tflite
-*.ckpt
-*.ckpt.*
-saved_model/
-tf_data/
-tensorflow_datasets/
-PoseTrack/models/
-
-# ── Project data & outputs ────────────────────────────────────────────────────
-PoseTrack/data/
-PoseTrack/outputs/
-PoseTrack/benchmarks/results/
-**/frames/
-
-# legacy
-PoseTrack/legacy/
-
-# ── Unity ─────────────────────────────────────────────────────────────────────
-# Generated
-[Ll]ibrary/
-[Ll]ogs/
-[Oo]bj/
-[Tt]emp/
-[Uu]ser[Ss]ettings/
-*.csproj
-*.sln
-*.pidb
-*.booproj
-*.suo
-*.unitypackage
-
-# Auto-imported Unity packages
-**/Assets/TextMesh Pro/
-**/Assets/TextMesh Pro.meta
-
-# Large binary assets 
-*.fbx
-
-# ── OS ────────────────────────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-desktop.ini
-*.tmp
-*.bak
-*.swp
-*.swo
-
-# ── IDE ───────────────────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.iml
-
-# ── Claude agent files ────────────────────────────────────────────────────────
-.claude/
-claude.md
-CLAUDE.md
-
-# ── Outputs / large data files ────────────────────────────────────────────────
-outputs/
-*.csv
+# Unity
+unity/UnityMedia/Library/
+unity/UnityMedia/Temp/
+unity/UnityMedia/Obj/
+unity/UnityMedia/Build/
+unity/UnityMedia/Builds/
+unity/UnityMedia/Logs/
+unity/UnityMedia/UserSettings/
