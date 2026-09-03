@@ -102,6 +102,7 @@ class MediaPipeRunner(PoseEstimator):
     ) -> None:
         self._use_tasks   = False
         self._start_time  = time.perf_counter()
+        self._last_ts_ms  = -1   # last timestamp handed to detect_for_video()
 
         try:
             self._init_solutions(detection_confidence, tracking_confidence, model_complexity)
@@ -173,8 +174,17 @@ class MediaPipeRunner(PoseEstimator):
     def _process_tasks(self, image_rgb: np.ndarray) -> list[Landmark] | None:
         import mediapipe as mp
 
-        # Use real elapsed time for timestamp (fixes the hardcoded +33ms bug)
+        # Use real elapsed time for the timestamp (rather than a hardcoded
+        # per-frame increment, which drifts at non-30fps rates). detect_for_video()
+        # requires STRICTLY increasing timestamps, but an int millisecond count
+        # can repeat when two frames are processed inside the same millisecond
+        # (fast offline loops over pre-extracted frames, or coarse timer
+        # resolution), so step forward by 1ms whenever that happens.
         ts_ms = int((time.perf_counter() - self._start_time) * 1000)
+        if ts_ms <= self._last_ts_ms:
+            ts_ms = self._last_ts_ms + 1
+        self._last_ts_ms = ts_ms
+
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
         result = self.pose.detect_for_video(mp_img, ts_ms)
 

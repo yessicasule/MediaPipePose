@@ -63,6 +63,42 @@ POSE_ELBOW_BENT  = "elbow_bent"
 
 REQUIRED_POSES   = [POSE_ARM_DOWN, POSE_ARM_FORWARD, POSE_ARM_SIDE, POSE_ELBOW_BENT]
 
+# ---------------------------------------------------------------------------
+# Gain-fitting guards
+# ---------------------------------------------------------------------------
+# A calibration gain is fitted as expected_deg / observed_span. If the user
+# held the reference pose poorly (e.g. arm_forward barely differs from
+# arm_down), observed_span is tiny and the gain explodes — 90/5 = 18x — which
+# would multiply every subsequent angle by that factor and drive the avatar
+# (and any downstream exoskeleton reference signal) wildly out of range.
+# We therefore require a minimum observed span before fitting a gain at all,
+# and clamp the fitted gain to a plausible range.
+MIN_REFERENCE_SPAN_DEG = 30.0   # below this, the pose was not held distinctly
+MIN_GAIN               = 0.5
+MAX_GAIN               = 2.0
+
+
+def _fit_gain(observed_span: float, expected_deg: float = 90.0, dof_name: str = "") -> float:
+    """
+    Fit a per-DOF calibration gain from one reference pose.
+
+    Returns 1.0 (identity, i.e. trust the raw estimate) when the observed
+    span is too small to fit a meaningful gain; otherwise returns
+    expected_deg / observed_span clamped to [MIN_GAIN, MAX_GAIN].
+    """
+    if abs(observed_span) < MIN_REFERENCE_SPAN_DEG:
+        print(f"[calibration] Reference span for {dof_name or 'DOF'} was only "
+              f"{observed_span:.1f} deg (< {MIN_REFERENCE_SPAN_DEG:.0f} deg); "
+              f"the pose was likely not held distinctly. Keeping gain = 1.0.")
+        return 1.0
+
+    gain = expected_deg / observed_span
+    clamped = max(MIN_GAIN, min(MAX_GAIN, gain))
+    if clamped != gain:
+        print(f"[calibration] Fitted gain {gain:.2f} for {dof_name or 'DOF'} is "
+              f"outside [{MIN_GAIN}, {MAX_GAIN}]; clamped to {clamped:.2f}.")
+    return clamped
+
 # Expected angles at each reference pose (degrees, anatomical ground truth)
 EXPECTED_ANGLES = {
     POSE_ARM_DOWN:    ArmAngles(shoulder_flexion=0,  shoulder_abduction=0,  shoulder_rotation=0,  elbow_flexion=0,  rotation_reliable=False),
@@ -203,7 +239,7 @@ class CalibrationManager:
         if POSE_ARM_FORWARD in self._reference_captures:
             fwd_raw = (self._reference_captures[POSE_ARM_FORWARD].shoulder_flexion
                        + self.data.flexion.offset)
-            self.data.flexion.scale = 90.0 / fwd_raw if abs(fwd_raw) > 1e-3 else 1.0
+            self.data.flexion.scale = _fit_gain(fwd_raw, 90.0, "shoulder flexion")
         self.data.flexion.min_raw = down.shoulder_flexion - 30
         self.data.flexion.max_raw = self._reference_captures.get(
             POSE_ARM_FORWARD, down).shoulder_flexion + 10
@@ -213,7 +249,7 @@ class CalibrationManager:
         if POSE_ARM_SIDE in self._reference_captures:
             side_raw = (self._reference_captures[POSE_ARM_SIDE].shoulder_abduction
                         + self.data.abduction.offset)
-            self.data.abduction.scale = 90.0 / side_raw if abs(side_raw) > 1e-3 else 1.0
+            self.data.abduction.scale = _fit_gain(side_raw, 90.0, "shoulder abduction")
         self.data.abduction.min_raw = down.shoulder_abduction - 15
         self.data.abduction.max_raw = self._reference_captures.get(
             POSE_ARM_SIDE, down).shoulder_abduction + 10
@@ -227,7 +263,7 @@ class CalibrationManager:
         if POSE_ELBOW_BENT in self._reference_captures:
             bent_raw = (self._reference_captures[POSE_ELBOW_BENT].elbow_flexion
                         + self.data.elbow.offset)
-            self.data.elbow.scale = 90.0 / bent_raw if abs(bent_raw) > 1e-3 else 1.0
+            self.data.elbow.scale = _fit_gain(bent_raw, 90.0, "elbow flexion")
         self.data.elbow.min_raw = down.elbow_flexion - 5
         self.data.elbow.max_raw = self._reference_captures.get(
             POSE_ELBOW_BENT, down).elbow_flexion + 10

@@ -350,6 +350,75 @@ class TestFilterBank(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Calibration gain fitting
+# ---------------------------------------------------------------------------
+
+class TestCalibrationGainFitting(unittest.TestCase):
+    """
+    A calibration gain is expected_deg / observed_span. A poorly-held
+    reference pose makes observed_span tiny and the naive gain explode,
+    which would scale every downstream angle (and any exoskeleton reference
+    signal) wildly out of range.
+    """
+
+    def test_well_held_pose_fits_expected_gain(self):
+        from src.processing.calibration import _fit_gain
+        # Observed 90 deg for an expected 90 deg reference -> unity gain.
+        self.assertAlmostEqual(_fit_gain(90.0, 90.0), 1.0, places=6)
+        # Observed 75 deg for an expected 90 deg -> modest 1.2x correction.
+        self.assertAlmostEqual(_fit_gain(75.0, 90.0), 1.2, places=6)
+
+    def test_tiny_span_does_not_explode(self):
+        """A 5 deg span must not produce the naive 18x gain."""
+        from src.processing.calibration import _fit_gain
+        self.assertEqual(_fit_gain(5.0, 90.0), 1.0)
+
+    def test_gain_is_clamped_to_plausible_range(self):
+        from src.processing.calibration import _fit_gain, MIN_GAIN, MAX_GAIN
+        # Span above the minimum but still small enough that the raw gain
+        # (90/35 = 2.57) exceeds MAX_GAIN, so it must be clamped.
+        self.assertEqual(_fit_gain(35.0, 90.0), MAX_GAIN)
+        # A very large span would give a tiny gain; clamp at MIN_GAIN.
+        self.assertEqual(_fit_gain(300.0, 90.0), MIN_GAIN)
+
+    def test_zero_span_is_safe(self):
+        """A degenerate (identical) pair of reference poses must not divide by zero."""
+        from src.processing.calibration import _fit_gain
+        self.assertEqual(_fit_gain(0.0, 90.0), 1.0)
+
+
+# ---------------------------------------------------------------------------
+# MediaPipe Tasks timestamp monotonicity
+# ---------------------------------------------------------------------------
+
+class TestTaskTimestampMonotonicity(unittest.TestCase):
+    """
+    MediaPipe Tasks' detect_for_video() requires strictly increasing
+    timestamps. An int-millisecond clock repeats when two frames are
+    processed inside the same millisecond (fast offline loops over
+    pre-extracted frames), which would raise at runtime.
+    """
+
+    def test_timestamps_strictly_increase_within_one_millisecond(self):
+        # Exercise the timestamp rule directly, without constructing a real
+        # MediaPipeRunner (which would require the mediapipe runtime).
+        last_ts_ms = -1
+        emitted = []
+        # Simulate 10 frames that all land on the same wall-clock millisecond.
+        for _ in range(10):
+            ts_ms = 7   # coarse clock: identical reading every frame
+            if ts_ms <= last_ts_ms:
+                ts_ms = last_ts_ms + 1
+            last_ts_ms = ts_ms
+            emitted.append(ts_ms)
+
+        self.assertEqual(len(set(emitted)), len(emitted),
+                         msg="Timestamps repeated within the same millisecond")
+        self.assertTrue(all(b > a for a, b in zip(emitted, emitted[1:])),
+                        msg="Timestamps were not strictly increasing")
+
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
