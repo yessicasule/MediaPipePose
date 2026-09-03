@@ -16,9 +16,8 @@
 
 \begin{document}
 
-\title{Monocular Vision-Based Estimation of Human Arm Joint Angles\\
-for Real-Time Digital Avatar Control:\\
-A Mathematically Grounded, Reproducibility-First Framework}
+\title{MonoArm: Anatomically Consistent Arm Joint Angle Estimation\\
+from a Single RGB Camera for Real-Time Avatar Control}
 
 \author{
 \IEEEauthorblockN{Author Name Withheld for Draft}
@@ -31,459 +30,394 @@ email@domain.example}
 \maketitle
 
 \begin{abstract}
-We present a monocular-camera framework that estimates anatomically
-consistent shoulder and elbow joint angles from 2D/pseudo-3D body
-keypoints and drives a rigged humanoid avatar in Unity in real time, as a
-low-cost, non-contact alternative to marker-based motion capture for
-rehabilitation robotics and future soft wearable exoskeleton calibration.
-The system decomposes the upper-arm and forearm direction vectors into
-four degrees of freedom -- shoulder flexion-extension, abduction-adduction,
-internal-external rotation, and elbow flexion -- using a Gram-Schmidt
-torso-relative coordinate frame and a ZXY Euler sequence chosen to move
-the decomposition's singularity away from the anatomical rest pose; three
-causal temporal filters (moving average, Savitzky-Golay, and a two-state
-Kalman filter) are implemented and compared against a common jitter/lag
-benchmark; a three-tier calibration procedure maps raw estimates to a
-user's range of motion and to the avatar's muscle space; and a UDP
-protocol streams filtered, calibrated angles to Unity at a configurable
-rate. In keeping with this project's emphasis on research-paper
-authenticity, every quantitative result in this paper -- 50 geometry and
-signal-processing unit tests, a synthetic-signal filter benchmark, a
-literature-calibrated occlusion-robustness study, and an end-to-end run
-of the real MediaPipe pose landmarker on a real (non-simulated)
-photograph -- was executed in the delivered code repository during this
-work and is exactly reproducible by re-running the cited script. We deliberately do not report accuracy
-numbers against large-scale 3D motion-capture ground truth (Human3.6M or
-CMU Panoptic Studio): both require external network access that was
-verified unavailable in the development environment used for this study
-(Human3.6M's registration portal is gated; the CMU Panoptic Studio data
-server was unreachable through the environment's network policy), and we
-consider fabricating or reusing unverified numbers for such a comparison
-incompatible with this project's authenticity requirement. Instead we
-give the exact, unmodified evaluation harness -- identical metric
-definitions, statistical protocol, and dataset loaders used throughout the
-paper's derivations -- so that real-data validation is a single documented
-command away once such access exists. We regard this explicit separation
-of ``what was measured'' from ``what is designed to be measurable'' as
-itself a contribution: it is the only way a reader can tell which numbers
-in a monocular pose-estimation paper are load-bearing.
+Soft wearable exoskeletons for upper-limb rehabilitation require joint
+angle references for calibration and validation, but marker-based motion
+capture is costly and lab-bound. We present MonoArm, a real-time
+framework that estimates four anatomically consistent degrees of freedom
+per arm -- shoulder flexion-extension, abduction-adduction,
+internal-external rotation, and elbow flexion -- from a single RGB camera
+and drives a rigged humanoid avatar in Unity. Joint angles are derived
+from upper-arm and forearm direction vectors expressed in a Gram-Schmidt
+orthonormalized torso frame and decomposed with a ZXY Euler sequence
+chosen to relocate the parameterization's coordinate singularity away
+from the arm-hanging rest pose, where the ISB-recommended YXY sequence is
+degenerate. Shoulder axial rotation, which is unobservable from the
+upper-arm vector alone, is estimated by a forearm-projection proxy that
+is explicitly gated below $25^\circ$ of elbow flexion rather than
+reported as a noise-dominated value. Three causal temporal filters
+(moving average, Savitzky-Golay, and a two-state Kalman filter) are
+implemented per channel and compared on a common jitter/lag benchmark; a
+three-tier calibration maps raw estimates to a user's range of motion
+under bounded-gain guards; and a UDP protocol streams filtered angles to
+Unity's Humanoid muscle-space API. On a synthetic benchmark the Kalman
+filter attains $0.55^\circ$ static standard deviation with no measurable
+step lag, against $1.46^\circ$ and $133$~ms for a five-sample moving
+average, and all configurations meet the $\pm3$--$5^\circ$ static-pose
+target. A 55-case analytic test suite verifies the angle solver against
+closed-form reference poses, torso-frame orthonormality, filter dynamics,
+and cross-framework keypoint remapping; end-to-end inference with the
+real MediaPipe landmarker on a real photograph produces bilateral angles
+consistent with the observed pose. We report validation scope precisely:
+all results here derive from analytic, synthetic, or single-image
+verification, and quantitative accuracy against large-scale 3D
+motion-capture ground truth (Human3.6M, CMU Panoptic Studio) was not
+obtainable in our environment; the complete evaluation harness for that
+comparison ships with the system and is documented for reuse.
 \end{abstract}
 
 \begin{IEEEkeywords}
-monocular pose estimation, joint angle estimation, MediaPipe, MoveNet,
-PoseNet, Unity, Kalman filter, Savitzky-Golay filter, rehabilitation
-robotics, wearable exoskeleton, reproducibility
+monocular pose estimation, joint angle estimation, MediaPipe, Unity,
+Kalman filter, rehabilitation robotics, wearable exoskeleton,
+reproducibility
 \end{IEEEkeywords}
 
 \section{Introduction}
 
-Restoring and assisting human arm movement is a central goal of
-rehabilitation robotics and wearable assistive technology. Individuals
-recovering from stroke, spinal cord injury, or neuromuscular disorders
-often require repetitive therapy and motion assistance to regain
-functional use of their upper limbs, and soft wearable exoskeletons are
-increasingly proposed as safe, comfortable systems for delivering it.
-Effective operation, evaluation, and personalization of such devices
-requires a way to measure human joint motion that does not itself require
-expensive laboratory infrastructure. Marker-based and multi-camera motion
-capture remain the gold standard for accuracy but are costly, lab-bound,
-and impractical outside a research setting. Recent single-RGB-camera pose
-estimators (MediaPipe Pose \cite{bazarevsky2020blazepose}, MoveNet
+Restoring upper-limb function after stroke, spinal cord injury, or
+neuromuscular disease typically demands repetitive, quantified therapy.
+Soft wearable exoskeletons are increasingly proposed to deliver such
+assistance safely and comfortably, but operating, evaluating, and
+personalizing them requires a measurement of joint motion that is itself
+trustworthy. Marker-based and multi-camera motion capture remain the
+accuracy gold standard while being expensive, lab-bound, and impractical
+for continuous or home use. Single-RGB-camera pose estimators --
+MediaPipe Pose \cite{bazarevsky2020blazepose}, MoveNet
 \cite{movenet2021blog}, and PersonLab-derived PoseNet
-\cite{papandreou2018personlab}) make it possible to track human body
-keypoints from ordinary webcam video, opening a low-cost, non-contact path
-to the same kind of reference signal.
+\cite{papandreou2018personlab} -- now track body keypoints from ordinary
+webcam video, offering a low-cost, non-contact route to the same
+reference signal.
 
-This project designs and implements a monocular camera-based system that
-estimates shoulder and elbow joint angles from 2D/pseudo-3D pose keypoints
-and uses them to drive a humanoid avatar in Unity in real time, with
-temporal filtering to reduce jitter, a calibration procedure that maps
-estimated human joint angles onto avatar joint rotations, and a UDP
-communication pipeline between the vision module and Unity. The
-architecture is deliberately laid out so the same joint-angle stream can
-later serve as a reference signal for calibrating and validating a soft
-wearable arm exoskeleton, though building that exoskeleton is out of
-scope here.
+Turning keypoints into a usable reference is not simply a matter of
+running a detector. Raw landmark coordinates are camera-relative, so the
+same physical shoulder pose yields different numbers under camera tilt or
+subject lean; a naive Euler decomposition is singular precisely at the
+pose a resting arm occupies most of the time; shoulder axial rotation is
+geometrically unobservable from the upper-arm segment alone; and
+keypoint-level jitter propagates into angle estimates that must
+nonetheless drive an avatar smoothly. This paper addresses those four
+problems concretely and reports what the resulting system does and does
+not establish.
 
-\subsection{On What This Paper Claims to Have Measured}
-A system that is meant to serve as a calibration or validation reference
-must itself be validated, and it is common for monocular arm-tracking
-projects to report only qualitative smoothness (``the avatar's arm moves
-like mine'') rather than quantitative agreement with 3D ground truth. We
-wanted to avoid that failure mode without falling into the opposite one:
-presenting numbers that were not actually produced by the delivered code.
-Two things followed from that choice. First, every numeric result
-reported in Sections~\ref{sec:results-tests}--\ref{sec:results-real-frame}
-was generated by running the named script inside this repository during
-the course of this work: Sections~\ref{sec:results-tests}--\ref{sec:results-occlusion}
-using only the standard library, NumPy, SciPy, pandas, and Matplotlib on
-synthetic, exactly-known inputs (no external dataset, camera, or GPU),
-and Section~\ref{sec:results-real-frame} running the real MediaPipe
-pose-estimation network on one real photograph. Second,
-the one class of result we could not produce -- mean per-joint angle error
-against real 3D motion-capture ground truth (Human3.6M
-\cite{ionescu2014human36m} or CMU Panoptic Studio \cite{joo2015panoptic})
--- is reported as unavailable rather than approximated, with the exact
-cause (Section~\ref{sec:dataset-access}) and the exact command that
-reproduces it once access exists (Section~\ref{sec:reproducing}).
+\subsection{Contributions}
+\begin{enumerate}
+\item A torso-relative, Gram-Schmidt orthonormalized coordinate frame and
+a ZXY Euler decomposition that keeps the coordinate singularity away from
+the arm-hanging rest pose, with a bilateral formulation that derives the
+left arm by sagittal reflection rather than a duplicated sign convention
+(Sections~\ref{sec:angles}--\ref{sec:bilateral}).
+\item An explicitly gated forearm-projection estimator for shoulder axial
+rotation, which reports a reliability flag rather than a noise-dominated
+angle when the elbow is too extended for the estimate to be observable
+(Section~\ref{sec:angles}).
+\item A per-channel comparison of three causal filters on a common
+static/step/sinusoid benchmark, treating filtering as an explicit
+ablation factor so that smoothing effects are never conflated with
+estimator accuracy (Section~\ref{sec:results-filters}).
+\item A three-tier calibration with bounded-gain guards that prevent a
+poorly-held reference pose from producing a runaway scale factor
+(Section~\ref{sec:calibration}), plus a UDP-to-Unity muscle-space control
+path that is avatar-agnostic (Section~\ref{sec:unity}).
+\item A validation account that separates analytically verified claims,
+synthetic benchmarks, and real-image verification from the dataset-scale
+accuracy comparison we could not run, together with the harness that
+would produce it (Sections~\ref{sec:results}--\ref{sec:limitations}).
+\end{enumerate}
 
 \section{Related Work}
 
 \subsection{Monocular 2D Pose Estimation}
-MediaPipe Pose is built on BlazePose \cite{bazarevsky2020blazepose}, a
-lightweight two-stage (detector + regressor) convolutional network
-predicting 33 pseudo-3D landmarks, optimized for real-time CPU/mobile
-inference. MoveNet \cite{movenet2021blog} is a single-shot
-center-tracking architecture released in Lightning (latency-optimized)
-and Thunder (accuracy-optimized) variants over a COCO 17-keypoint output.
-PoseNet, as used here, is a TensorFlow Lite MobileNetV1
-heatmap-and-offset decoder whose bottom-up, part-based grouping traces to
-PersonLab \cite{papandreou2018personlab}. All three are integrated behind
-a common \texttt{PoseEstimator} interface so that framework identity is a
-single swappable factor.
+MediaPipe Pose builds on BlazePose \cite{bazarevsky2020blazepose}, a
+two-stage detector-plus-regressor network predicting 33 pseudo-3D
+landmarks under real-time CPU budgets. MoveNet \cite{movenet2021blog} is
+a single-shot center-tracking architecture released in latency-optimized
+(Lightning) and accuracy-optimized (Thunder) variants over COCO
+17-keypoint output. The PoseNet variant used here is a TensorFlow Lite
+MobileNetV1 heatmap-and-offset decoder whose bottom-up part grouping
+derives from PersonLab \cite{papandreou2018personlab}. We integrate all
+three behind one \texttt{PoseEstimator} interface, remapping COCO-17
+outputs onto the MediaPipe 33-landmark indexing so that estimator
+identity is a single swappable factor rather than a fork in the
+downstream code.
 
 \subsection{Anatomical Angle Extraction and Filtering}
-Extracting clinically meaningful joint angles from 2D or pseudo-3D
-keypoints requires a body-relative reference frame. We follow the spirit
-of the International Society of Biomechanics (ISB) recommendation for the
-shoulder and elbow \cite{wu2005isb}, adapted to a ZXY Euler sequence for
-the numerical reason given in Section~\ref{sec:angles}, and draw on prior
-reconstructions of arm kinematics from spatial tracking data
-\cite{biryukova2000kinematics} and a simplified two-link rigid-body arm
-model \cite{koritnik2003kinematic} for the underlying kinematic
-assumptions. Real-time smoothing of noisy angle estimates is a classical
-signal-processing problem; we compare a two-state Kalman filter
-\cite{kalman1960new} against Savitzky-Golay polynomial smoothing
-\cite{savitzky1964smoothing} and a plain moving average.
+Clinically meaningful joint angles require a body-relative frame. We
+follow the intent of the ISB recommendation for shoulder and elbow
+reporting \cite{wu2005isb}, substituting a ZXY Euler sequence for
+numerical reasons detailed in Section~\ref{sec:angles}, and adopt the
+two-link rigid-segment arm abstraction used in prior reconstructions of
+arm kinematics from spatial tracking \cite{biryukova2000kinematics,
+koritnik2003kinematic}. For smoothing we compare a two-state Kalman
+filter \cite{kalman1960new} with Savitzky-Golay polynomial smoothing
+\cite{savitzky1964smoothing} and a moving average.
 
-\subsection{Benchmark Datasets}
-Human3.6M \cite{ionescu2014human36m} is the de facto standard for 3D human
-pose evaluation, providing 3.6 million frames of synchronized video and
-MoCap-derived 3D joint positions for seven subjects, but access requires
-an approved researcher account at \url{vision.imar.ro}. CMU Panoptic
-Studio \cite{joo2015panoptic} is a 480-camera dome capture system for
-markerless motion capture; a subset of its sequences is distributed
-without a registration gate and has been used elsewhere as a substitute
-when Human3.6M access is unavailable. This framework's evaluation harness
-(Section~\ref{sec:eval-harness}) targets both, but neither was reachable
-from the environment used for this study (Section~\ref{sec:dataset-access}).
+\subsection{Benchmarks and Evaluation Practice}
+Human3.6M \cite{ionescu2014human36m} is the standard 3D human pose
+benchmark, providing 3.6M frames of synchronized video and MoCap-derived
+joint positions across seven subjects, gated behind researcher
+registration. CMU Panoptic Studio \cite{joo2015panoptic} is a 480-camera
+dome system whose reconstructed 3D keypoints are partially distributed
+without registration and are commonly used as a substitute. Mean
+Per-Joint Angle Error (MPJAE) and Percentage of Correct Keypoints follow
+the conventions of \cite{yang2011articulated, mehta2017vnect}. For
+system comparison we use Wilcoxon signed-rank testing
+\cite{wilcoxon1945individual}, Cohen's $d_z$ \cite{cohen1988statistical},
+bootstrap confidence intervals, Holm-Bonferroni correction
+\cite{holm1979simple}, and Bland-Altman agreement analysis
+\cite{bland1986statistical}.
 
-\subsection{Evaluation Methodology}
-Mean Per-Joint Position/Angle Error and Percentage of Correct Keypoints
-(PCK) are standard in the pose estimation literature
-\cite{yang2011articulated,mehta2017vnect}; we adopt the angular analogue,
-Mean Per-Joint Angle Error (MPJAE), following the convention used for
-monocular 3D pose validation in VNect \cite{mehta2017vnect}. For
-comparing systems we use paired significance testing (Wilcoxon
-signed-rank \cite{wilcoxon1945individual}), effect-size reporting
-(Cohen's $d_z$ \cite{cohen1988statistical}), percentile bootstrap
-confidence intervals, and Holm-Bonferroni multiple-comparison correction
-\cite{holm1979simple}; Bland-Altman analysis \cite{bland1986statistical}
-supplements correlation-based agreement plots.
-
-\section{System Architecture}
+\section{Method}
+\label{sec:method}
 
 \subsection{Pipeline Overview}
-The system has three subsystems. A \emph{vision module} captures video
-from a monocular RGB camera and runs a 2D/pseudo-3D pose estimator
-(MediaPipe Pose, MoveNet, or PoseNet, selected behind a common interface)
-to extract upper-body keypoints. A \emph{processing module} builds a
-torso-relative coordinate frame once per frame, decomposes it into four
-joint angles per arm (shared code path for both arms via a sagittal-plane
-reflection, Section~\ref{sec:bilateral}), applies one of three causal
-temporal filters, and applies a three-tier calibration
-(Section~\ref{sec:calibration}). A \emph{Unity module} receives filtered,
-calibrated angles over UDP and drives a Humanoid-rigged avatar's arm via
-Unity's muscle-space API, with an independent smoothing layer
-(\texttt{Mathf.SmoothDamp}) for frame-rate-independent animation.
-Filtering is evaluated as an explicit, separate ablation factor
-(Section~\ref{sec:filtering}) rather than folded into the accuracy
-numbers, so a filter's effect on jitter and a framework's raw tracking
-accuracy are never conflated.
+A vision module captures monocular RGB frames and runs a selected pose
+estimator. A processing module constructs a torso frame once per frame,
+decomposes four joint angles per arm, applies one causal temporal filter
+per channel (Section~\ref{sec:filtering}), and applies calibration. A Unity module receives the
+resulting angle stream over UDP and drives a Humanoid-rigged avatar
+through the muscle-space API, with an independent frame-rate-independent
+smoothing stage.
 
 \subsection{Torso Coordinate Frame}
-Raw landmark coordinates are not directly interpretable as anatomical
-angles: the same physical shoulder pose produces different raw
-coordinates depending on camera tilt and the subject's stance. We
-therefore construct an orthonormal torso frame from the four torso
-landmarks (left/right shoulder, left/right hip) once per frame. Writing
-$\mathbf{h}_{mid}$ and $\mathbf{s}_{mid}$ for the hip and shoulder
-midpoints,
+From the four torso landmarks (left/right shoulder, left/right hip), with
+$\mathbf{h}_{mid}$ and $\mathbf{s}_{mid}$ the hip and shoulder midpoints,
 \begin{align}
 \hat{\mathbf{y}} &= \operatorname{norm}(\mathbf{s}_{mid} - \mathbf{h}_{mid}) &&\text{(superior)}\\
-\mathbf{x}_{c} &= \operatorname{norm}(\mathbf{s}_{L} - \mathbf{s}_{R}) &&\text{(lateral candidate)}
+\mathbf{x}_{c} &= \operatorname{norm}(\mathbf{s}_{L} - \mathbf{s}_{R}) &&\text{(lateral candidate)}.
 \end{align}
-Because noisy keypoints make $\mathbf{x}_c$ and $\hat{\mathbf{y}}$ only
-approximately orthogonal, one step of Gram-Schmidt orthogonalization is
-applied:
+Keypoint noise leaves $\mathbf{x}_c$ and $\hat{\mathbf{y}}$ only
+approximately orthogonal, so one Gram-Schmidt step restores an exact
+basis:
 \begin{align}
 \mathbf{x}' &= \mathbf{x}_c - (\mathbf{x}_c\cdot\hat{\mathbf{y}})\hat{\mathbf{y}}, &
 \hat{\mathbf{z}} &= \operatorname{norm}(\mathbf{x}' \times \hat{\mathbf{y}}) \\
-\hat{\mathbf{x}} &= \operatorname{norm}(\hat{\mathbf{y}} \times \hat{\mathbf{z}}) &&
+\hat{\mathbf{x}} &= \operatorname{norm}(\hat{\mathbf{y}} \times \hat{\mathbf{z}}). &&
 \end{align}
-giving a right-handed frame $R = [\hat{\mathbf{x}}\;\hat{\mathbf{y}}\;\hat{\mathbf{z}}]$
-with $\hat{\mathbf{x}}$ lateral (toward the subject's left),
-$\hat{\mathbf{y}}$ superior, and $\hat{\mathbf{z}}$ anterior. A world
-vector is expressed in torso coordinates as $\mathbf{v}_{torso} =
-R^{\!\top}\mathbf{v}_{world}$. Section~\ref{sec:results-tests} reports
-that $R^{\!\top}R = I$ and $\det(R) = +1$ hold in our own test suite to
-within $10^{-9}$ across randomized non-degenerate torso configurations,
-i.e.\ the constructed frame is numerically orthonormal and right-handed,
-not merely approximately so.
+This yields a right-handed frame
+$R = [\hat{\mathbf{x}}\;\hat{\mathbf{y}}\;\hat{\mathbf{z}}]$ with
+$\hat{\mathbf{x}}$ lateral (toward the subject's left),
+$\hat{\mathbf{y}}$ superior, and $\hat{\mathbf{z}}$ anterior; world
+vectors map to torso coordinates as
+$\mathbf{v}_{torso} = R^{\!\top}\mathbf{v}_{world}$. Because all
+downstream angles are expressed in this frame, camera tilt and torso lean
+are compensated implicitly. Section~\ref{sec:results-analytic} verifies
+$R^{\!\top}R = I$ and $\det(R) = +1$ numerically.
 
-\subsection{Shoulder and Elbow Angle Decomposition}
+\subsection{Shoulder and Elbow Decomposition}
 \label{sec:angles}
 Let $\mathbf{v} = (v_x, v_y, v_z)$ be the unit upper-arm vector
-(shoulder$\to$elbow) in torso coordinates. Shoulder orientation is
-decomposed with a ZXY Euler sequence rather than the ISB-recommended YXY
-sequence, because YXY is singular exactly at the arm-hanging rest pose
-($\mathbf{v}\approx(0,-1,0)$) -- the most frequently occupied pose in
-natural motion -- whereas ZXY relocates that singularity to the arm
-pointing directly at the camera, which is rare in practice (at the cost
-of a second, less severe singularity at full abduction, discussed in
-Section~\ref{sec:limitations}). Flexion-extension and abduction-adduction
-are
+(shoulder$\to$elbow) in torso coordinates. We decompose shoulder
+orientation with a ZXY sequence rather than the ISB-recommended YXY
+because YXY is singular exactly at $\mathbf{v}\approx(0,-1,0)$ -- the
+arm-hanging rest pose, which dominates natural motion. ZXY moves that
+pole to the arm pointing along the camera axis, a rarely-held pose, at
+the cost of a second degeneracy at full abduction
+(Section~\ref{sec:limitations}). Then
 \begin{align}
 \theta_{flex} &= \operatorname{atan2}(-v_z, -v_y) \\
-\theta_{abd} &= \arcsin(\operatorname{clip}(-v_x, -1, 1))
+\theta_{abd} &= \arcsin(\operatorname{clip}(-v_x, -1, 1)),
 \end{align}
-(the sign convention on $v_x$ accounts for $\hat{\mathbf{x}}$ pointing
-toward the subject's left; the left arm is handled by the reflection in
-Section~\ref{sec:bilateral} rather than a second sign convention).
-Elbow flexion, from the forearm unit vector $\hat{\mathbf{f}}$
-(elbow$\to$wrist) and upper-arm unit vector $\hat{\mathbf{u}}$ (both
-proximal$\to$distal), is
+where the sign on $v_x$ reflects $\hat{\mathbf{x}}$ pointing toward the
+subject's left. Elbow flexion follows from the upper-arm and forearm unit
+vectors $\hat{\mathbf{u}}, \hat{\mathbf{f}}$ (both proximal$\to$distal):
 \begin{equation}
 \theta_{elbow} = \arccos(\operatorname{clip}(\hat{\mathbf{u}}\cdot\hat{\mathbf{f}}, -1, 1)),
 \end{equation}
-giving $0^\circ$ for a fully extended arm and increasing toward maximal
-flexion.
+giving $0^\circ$ at full extension and increasing with flexion.
 
-Shoulder internal/external rotation cannot be recovered from the
-upper-arm vector alone, since axial spin of the humerus does not move the
-elbow. We use the forearm as a proxy, projecting it onto the plane
-perpendicular to the upper-arm axis:
+Axial rotation of the humerus does not move the elbow and is therefore
+not recoverable from $\mathbf{v}$. We estimate it from the forearm's
+component orthogonal to the upper-arm axis:
 \begin{equation}
-\mathbf{f}_\perp = \hat{\mathbf{f}} - (\hat{\mathbf{f}}\cdot\hat{\mathbf{u}})\hat{\mathbf{u}}, \qquad
+\mathbf{f}_\perp = \hat{\mathbf{f}} - (\hat{\mathbf{f}}\cdot\hat{\mathbf{u}})\hat{\mathbf{u}}, \quad
 \theta_{rot} = \operatorname{atan2}(\mathbf{f}_\perp\!\cdot\!\mathbf{e}_1,\ \mathbf{f}_\perp\!\cdot\!\mathbf{e}_2)
 \end{equation}
 for an orthonormal basis $(\mathbf{e}_1, \mathbf{e}_2)$ of that plane.
-This projection is only well-conditioned when the elbow is bent enough
-that $\|\mathbf{f}_\perp\|$ is bounded away from zero; the system gates
-the estimate as unreliable below $25^\circ$ of elbow flexion
-(\texttt{ROTATION\_RELIABLE\_THRESHOLD}) and returns a flagged
-placeholder rather than a noise-dominated angle. This threshold and its
-consequences for evaluation are exercised directly by our own test suite
-(Section~\ref{sec:results-tests}).
+The projection is well-conditioned only while $\|\mathbf{f}_\perp\|$ is
+bounded away from zero, i.e.\ while the elbow is meaningfully bent. Below
+$25^\circ$ of elbow flexion the system returns a placeholder with the
+reliability flag cleared, so that consumers -- including the evaluation
+harness -- can exclude geometrically meaningless samples instead of
+averaging noise into a reported error.
 
-\subsection{Bilateral Symmetry}
+\subsection{Bilateral Formulation}
 \label{sec:bilateral}
-Rather than duplicating the above formulas with flipped signs for the
-left arm, the left arm's torso-frame vectors are reflected across the
-sagittal plane, $(v_x,v_y,v_z)\mapsto(-v_x,v_y,v_z)$, before applying the
-right-arm formulas unchanged. A reflected left arm is geometrically
-indistinguishable from a right arm, so the same equations yield
-anatomically mirrored conventions (abduction positive $=$ away from the
-midline, internal rotation positive, for both arms) without a second code
-path. Elbow flexion needs no reflection, since a dot product is
-reflection-invariant.
+Rather than duplicating the equations with flipped signs, the left arm's
+torso-frame vectors are reflected across the sagittal plane,
+$(v_x,v_y,v_z)\mapsto(-v_x,v_y,v_z)$, before the right-arm formulas are
+applied unchanged. A reflected left arm is geometrically
+indistinguishable from a right arm, so this yields mirrored anatomical
+conventions (abduction positive away from the midline, internal rotation
+positive) on both sides from one code path. Elbow flexion, being a dot
+product, is reflection-invariant. The same reflection is applied in the
+ground-truth extractors, so predictions and references always share one
+angle space.
 
 \subsection{Temporal Filtering}
 \label{sec:filtering}
-Three causal filters are implemented per angle channel. The moving
-average, $y[n]=\frac1W\sum_{k=0}^{W-1}x[n-k]$, is a cheap baseline with
+Three causal filters operate independently per channel. The moving
+average $y[n]=\frac1W\sum_{k=0}^{W-1}x[n-k]$ is a baseline with
 $(W\!-\!1)/2$ frames of group delay. Savitzky-Golay
-\cite{savitzky1964smoothing} fits a degree-$p$ polynomial to a window and
-evaluates it at the most recent sample, preserving curvature and peak
-timing better than a flat mean. The two-state Kalman filter models state
-$\mathbf{x}=[\theta,\dot\theta]^{\!\top}$ under a constant-velocity
-transition $F=\begin{bsmallmatrix}1&dt\\0&1\end{bsmallmatrix}$ with
-measurement matrix $H=[1\ 0]$, discretized white-noise-acceleration
-process covariance
-$Q = q\begin{bsmallmatrix}dt^4/4 & dt^3/2\\ dt^3/2 & dt^2\end{bsmallmatrix}$,
-and the standard predict/update recursion
+\cite{savitzky1964smoothing} fits a degree-$p$ polynomial over a window
+and evaluates it at the most recent sample, preserving curvature better
+than a flat mean. The two-state Kalman filter models
+$\mathbf{x}=[\theta,\dot\theta]^{\!\top}$ under constant velocity,
+$F=\begin{bsmallmatrix}1&dt\\0&1\end{bsmallmatrix}$, $H=[1\ 0]$, with
+discretized white-noise-acceleration process covariance
+$Q = q\begin{bsmallmatrix}dt^4/4 & dt^3/2\\ dt^3/2 & dt^2\end{bsmallmatrix}$
+and the standard recursion
 \begin{align}
 \mathbf{x}^- &= F\mathbf{x}, & P^- &= FPF^{\!\top}+Q \\
 K &= P^-H^{\!\top}(HP^-H^{\!\top}+R)^{-1} \\
 \mathbf{x} &= \mathbf{x}^- + K(z-H\mathbf{x}^-), & P &= (I-KH)P^-.
 \end{align}
-Because the state includes angular velocity, the predict step
-extrapolates through fast motion, reducing lag relative to the moving
-average. Filtering is reset at sequence/tracking-loss boundaries so it
-never smooths across a discontinuity, and is evaluated as an explicit
-ablation factor (Section~\ref{sec:results-filters}) rather than folded
-into framework-accuracy numbers.
+Carrying angular velocity in the state lets the predict step extrapolate
+through fast motion, which is what reduces lag relative to a moving
+average. Filter state resets at tracking-loss and sequence boundaries so
+smoothing never spans a discontinuity.
 
 \subsection{Calibration}
 \label{sec:calibration}
-A three-tier calibration pipeline maps raw estimated angles to a user's
-range of motion and to Unity's normalized muscle space $[-1,+1]$. Tier 1
-(static) has the user hold four reference poses -- arm down, arm forward
-($90^\circ$ flexion), arm to the side ($90^\circ$ abduction), elbow bent
-($90^\circ$ flexion) -- from which a per-DOF affine map
-$\text{calibrated} = (\text{raw} + \text{offset})\times\text{scale}$ is
-fit, with offset zeroing the arm-down pose and scale mapping the observed
-range onto the $90^\circ$ anatomical reference. Tier 2 (dynamic) records
-a free range-of-motion sweep and refines the min/max bounds from observed
-extrema. Tier 3 (online auto-expansion) grows the recorded range by
-$5^\circ$ whenever a live reading exceeds it, so the avatar never
-hard-clips for a more flexible user without a full recalibration.
-Calibration state is persisted as JSON between sessions. Because the same
-affine calibration structure -- a per-DOF offset and scale from a small
-set of reference poses -- is exactly what a wearable exoskeleton's joint
-encoders would need to be aligned to an anatomical zero, this module is
-written to be reusable as-is for that future integration, not merely
-analogous to it.
+Calibration proceeds in three tiers. Tier~1 records four static
+reference poses (arm down; arm forward at $90^\circ$ flexion; arm to the
+side at $90^\circ$ abduction; elbow bent to $90^\circ$) and fits a
+per-DOF affine map
+$\text{calibrated} = (\text{raw} + \text{offset})\times\text{gain}$,
+where the offset zeroes the arm-down reading and the gain maps the
+observed span onto the anatomical reference. Tier~2 refines the range
+bounds from a free range-of-motion sweep. Tier~3 expands the stored range
+online by $5^\circ$ whenever a live reading exceeds it, so the avatar
+never hard-clips for a hypermobile user. State persists as JSON between
+sessions.
 
-\subsection{Communication Protocol and Unity Integration}
-Vision-side and Unity-side processes communicate over UDP at a
-configurable rate (default 30~Hz, minimum spec $\geq 20$--$30$~Hz). Each
-packet is one newline-terminated line. Two formats are supported: a
-single-arm packet \texttt{S,<flex>,<abd>,<rot>,<elbow>\textbackslash n}
-and a bilateral packet
-\texttt{B,<r\_flex>,...,<r\_elbow>,<l\_flex>,...,<l\_elbow>\textbackslash n}
-mirroring the right side while an occluded side holds its last known
-value. On the Unity side, a background thread performs the blocking
-socket receive and hands validated packets to the main thread through a
-double-buffered, lock-protected struct so the render loop never blocks on
-network I/O; \texttt{AvatarMuscleController} then maps each DOF's degrees
-to Unity's Humanoid muscle space via a configurable per-DOF linear map and
-a \texttt{Mathf.SmoothDamp} stage for frame-rate-independent smoothing,
-using \texttt{HumanPoseHandler} rather than hardcoded bone transforms so
-the same script works with any Humanoid-rigged avatar.
+Naive gain fitting is fragile: if the user holds the reference pose
+poorly so that the observed span is small, $\text{gain} = 90^\circ /
+\text{span}$ explodes -- a $5^\circ$ span yields an $18\times$ gain that
+would scale every subsequent angle far out of range. We therefore refuse
+to fit a gain below a $30^\circ$ minimum span, and clamp any fitted gain
+to $[0.5, 2.0]$, falling back to unity and reporting the reason
+otherwise. This matters beyond avatar aesthetics: the same affine
+structure is what a wearable exoskeleton's joint encoders would need for
+alignment to an anatomical zero, so an unbounded gain would propagate
+directly into a device reference signal.
+
+\subsection{Communication and Unity Integration}
+\label{sec:unity}
+The vision and rendering processes communicate over UDP at a configurable
+rate (default $30$~Hz; specification minimum $20$--$30$~Hz), one
+newline-terminated packet per pose. A single-arm packet carries
+\texttt{S,<flex>,<abd>,<rot>,<elbow>}; a bilateral packet carries
+\texttt{B,} followed by the right then left quadruple, with an untracked
+side holding its last value rather than snapping to zero. On the Unity
+side a background thread performs the blocking receive and publishes into
+a lock-protected double buffer, so the render loop never blocks on
+network I/O. Angles are mapped to Unity's normalized Humanoid muscle
+space through a configurable per-DOF linear transform and a
+\texttt{Mathf.SmoothDamp} stage; using \texttt{HumanPoseHandler} rather
+than named bone transforms keeps the controller avatar-agnostic across
+any Humanoid-rigged model.
 
 \section{Evaluation Methodology}
 \label{sec:eval-harness}
 
 \subsection{Metrics}
-For predicted/ground-truth angle pairs $\{(p_i, g_i)\}_{i=1}^{N}$ (frames
-with either signal missing excluded, never imputed), the harness computes
-Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), signed bias
-$\frac1N\sum(p_i-g_i)$, Pearson correlation $r$, coefficient of
-determination $R^2$, Percentage of Correct Keypoints at
-$5^\circ/10^\circ/15^\circ$ (fraction of frames with $|p_i-g_i|<\theta$),
-and jitter (mean $|\Delta p|$ frame-to-frame). MPJAE is the macro-average
-of MAE across the four joint DOF. Angular differences use a circular
-form, $\Delta_{circ} = ((p-g)+180)\bmod 360 - 180$, so a true angle path
-crossing the $\pm180^\circ$ branch cut of the \texttt{atan2}-based
-decomposition is not scored as an artificially large error.
+For prediction/reference pairs $\{(p_i, g_i)\}_{i=1}^{N}$ -- frames
+missing either signal are excluded, never imputed -- the harness computes
+MAE, RMSE, signed bias, Pearson $r$, $R^2$, PCK at
+$5^\circ/10^\circ/15^\circ$, and jitter (mean frame-to-frame
+$|\Delta p|$). MPJAE is the macro-average of per-DOF MAE. All angular
+differences use the circular form
+$\Delta_{circ} = ((p-g)+180)\bmod 360 - 180$, so a trajectory crossing
+the $\pm180^\circ$ branch cut of the \texttt{atan2}-based decomposition
+is not charged an artificial $360^\circ$ error.
 
 \subsection{Statistical Protocol}
-For comparing two systems on the same frames, the harness runs a paired
-$t$-test and, as a distribution-free alternative given the heavy-tailed
-nature of pose error, the Wilcoxon signed-rank test on per-frame
-absolute-error differences, reports Cohen's $d_z$ as an effect size,
-computes percentile bootstrap confidence intervals, and applies
-Holm-Bonferroni correction across the resulting family of tests.
+Two systems evaluated on identical frames are compared with a paired
+$t$-test and, given the heavy-tailed nature of pose error, the
+distribution-free Wilcoxon signed-rank test over per-frame absolute
+errors, with Cohen's $d_z$ as effect size, percentile bootstrap
+confidence intervals, and Holm-Bonferroni correction across the resulting
+family.
 
-\subsection{Reproducible Experimental Protocol}
-Dataset-backed evaluation follows the Human3.6M standard split -- train
-S1/S5/S6/S7 for parameter tuning, validate on S8 for filter/model
-selection, test on S9/S11 touched exactly once -- with an alternative
-Leave-One-Subject-Out protocol for generalization checks, and an explicit
-\texttt{assert\_no\_leakage} guard that raises if a tuning subject
-reappears in the test set.
-
-\subsection{Publication-Grade vs. Synthetic Labeling}
-The dataset-backed harness (\texttt{evaluate\_h36m.py},
-\texttt{evaluate\_panoptic.py}) distinguishes three prediction sources:
-\texttt{live} (real pose estimators run on real extracted video frames --
+\subsection{Protocol and Validity Labeling}
+Dataset-backed evaluation follows the Human3.6M standard split (tune on
+S1/S5/S6/S7, select on S8, test once on S9/S11), with Leave-One-Subject-Out
+available as an alternative and an explicit leakage assertion that raises
+if a tuning subject reappears in the test set. The harness distinguishes
+three prediction sources: \texttt{live} (real estimators on real frames,
 the only publication-grade mode), \texttt{csv} (previously computed real
-predictions, publication-grade if genuinely produced that way), and
-\texttt{synthetic} (predictions simulated as ground truth plus
+predictions), and \texttt{synthetic} (ground truth plus
 literature-calibrated Gaussian noise, for pipeline verification only).
-Every synthetic-mode output is tagged \texttt{publication\_grade=false} in
-its exported metadata and is printed with an explicit warning banner; the
-harness never silently presents a simulated number as an experimental
-one. We adopt this same labeling discipline for every number reported
+Synthetic runs are tagged \texttt{publication\_grade=false} in exported
+metadata and emit a warning banner, so a simulated number cannot be
+mistaken for a measured one. We apply the same labeling to every result
 below.
 
-\section{Results: Self-Contained Correctness Verification}
-\label{sec:results-tests}
+\section{Results}
+\label{sec:results}
 
-The repository's 50-test suite (\texttt{tests/test\_pose\_estimators.py},
-22 tests, and \texttt{tests/test\_evaluation.py}, 28 tests) requires no
-camera, no GPU, and no external dataset -- it constructs synthetic
-landmark configurations with known geometry and checks the resulting
-angles analytically. We ran the complete suite in the delivered
-repository (\texttt{python -m unittest tests.test\_pose\_estimators
-tests.test\_evaluation}); all 50 tests pass. The tests that matter most
-for the claims in Section~\ref{sec:angles}--\ref{sec:bilateral}:
+\subsection{Analytic Correctness}
+\label{sec:results-analytic}
+The 55-case suite (\texttt{tests/test\_pose\_estimators.py},
+\texttt{tests/test\_evaluation.py}) requires no camera, GPU, or external
+dataset: it constructs landmark configurations with closed-form expected
+angles and checks the solver against them. All 55 pass. The checks that
+carry the claims of Section~\ref{sec:method} are:
+
 \begin{itemize}
-\item \textbf{Reference-pose geometry.} Arm hanging straight down yields
-flexion, abduction, and elbow flexion each within $1^\circ$ of
-$0^\circ$; arm raised to horizontal in front of the torso yields flexion
-within $2^\circ$ of $90^\circ$; arm raised to horizontal at the side
-yields abduction within $2^\circ$ of $90^\circ$; a $90^\circ$-bent elbow
-with the forearm horizontal yields elbow flexion within $2^\circ$ of
-$90^\circ$. These are noiseless analytic checks -- they verify the
-\emph{formulas} are geometrically correct, not that a real camera + pose
-network will reproduce them under tracking noise (Section~\ref{sec:limitations}).
-\item \textbf{Physical constraints.} Elbow flexion is never negative
-across randomized synthetic configurations, as required by
-Section~\ref{sec:angles}'s derivation.
-\item \textbf{Rotation reliability gate.} Shoulder rotation is correctly
-flagged unreliable when synthetic elbow flexion is held below the
-$25^\circ$ threshold.
-\item \textbf{Torso frame orthonormality.} $R^{\!\top}R=I$ and
-$\det(R)=+1$ hold to floating-point precision across randomized
-non-degenerate shoulder/hip configurations; a degenerate configuration
-(zero-length shoulder or hip baseline) correctly returns \texttt{None}
-rather than a degenerate frame.
-\item \textbf{Filter behavior.} The moving-average filter measurably
-reduces injected Gaussian noise; the Kalman filter initializes to the
-first observed value and converges toward a constant input; all filters
-correctly reset their internal state when \texttt{reset()} is called
-(the tracking-loss code path).
-\item \textbf{MoveNet COCO$\to$MediaPipe remapping.} The 17-keypoint
-COCO output's $(y, x, \text{score})$ ordering is correctly transposed to
-MediaPipe's $(x, y, \ldots)$ convention, and each of the eight remapped
-joints lands at its documented target index -- the exact bug class
-described in Section~\ref{sec:limitations} as a hazard of mixing
-keypoint schemas.
-\item \textbf{Metrics correctness.} MAE scales with injected noise as
-the theoretical expectation $\sigma\sqrt{2/\pi}$ for zero-bias Gaussian
-error; MPJAE is exactly the arithmetic mean of the four per-joint MAEs;
-PCK@5$^\circ$ decreases monotonically as injected noise grows; a
-framework with less injected noise deterministically ranks with lower
-MPJAE than one with more.
+\item \textbf{Reference poses.} An arm hanging straight down yields
+flexion, abduction, and elbow flexion each within $1^\circ$ of zero; an
+arm horizontal in front yields $90^\circ$ flexion within $2^\circ$; an
+arm horizontal at the side yields $90^\circ$ abduction within $2^\circ$;
+a right-angled elbow yields $90^\circ$ flexion within $2^\circ$.
+\item \textbf{Frame validity.} $R^{\!\top}R = I$ and $\det(R) = +1$ to
+floating-point precision over randomized non-degenerate configurations;
+degenerate input (collapsed shoulder or hip baseline) returns no frame
+rather than a malformed one.
+\item \textbf{Physical constraints and gating.} Elbow flexion is never
+negative; shoulder rotation is flagged unreliable whenever elbow flexion
+falls below the $25^\circ$ threshold.
+\item \textbf{Filters.} The moving average reduces injected Gaussian
+noise; the Kalman filter initializes to the first observation and
+converges on a constant input; all filters clear state on \texttt{reset()}.
+\item \textbf{Calibration guards.} A $5^\circ$ reference span yields
+unity gain rather than the naive $18\times$; spans that would fit a gain
+outside $[0.5, 2.0]$ are clamped; a zero span cannot divide by zero.
+\item \textbf{Keypoint remapping.} MoveNet's COCO $(y, x, \text{score})$
+ordering is correctly transposed into MediaPipe's $(x, y, z)$ convention
+and each remapped joint lands at its documented index -- a silent
+failure mode when two keypoint schemas are mixed.
+\item \textbf{Metrics.} MAE tracks injected noise at the theoretical
+$\sigma\sqrt{2/\pi}$; MPJAE equals the mean of per-DOF MAEs; PCK@$5^\circ$
+decreases monotonically with noise.
 \end{itemize}
 
-\section{Results: Temporal Filter Benchmark}
+\subsection{Temporal Filter Benchmark}
 \label{sec:results-filters}
-
-\texttt{scripts/compare\_filters.py} generates a fully synthetic
-400-sample, 30~Hz signal in three segments -- a static hold at
-$45^\circ$ (frames 0--150, for the static-variance target of
-Section~\ref{sec:calibration-target}), a step to $90^\circ$ (frames
-150--250, for step-response lag), and a $1$~Hz sinusoidal sweep (frames
-250--400, for tracking fidelity) -- and evaluates each filter
-configuration against it. We ran this script in the delivered repository;
-Table~\ref{tab:filters} reports its unmodified console output, and
-Fig.~\ref{fig:filters} is the script's own generated figure.
+\texttt{scripts/compare\_filters.py} synthesizes a 400-sample, $30$~Hz
+signal in three segments: a static hold at $45^\circ$ (samples 0--150,
+for static variance), a step to $90^\circ$ (150--250, for response lag),
+and a $1$~Hz sinusoidal sweep (250--400, for tracking fidelity).
+Table~\ref{tab:filters} reports the resulting metrics and
+Fig.~\ref{fig:filters} the generated traces.
 
 \begin{table}[t]
 \centering
-\caption{Filter comparison on a synthetic 30~Hz benchmark signal (static
-hold, step, and $1$~Hz sinusoidal segments), as produced by
-\texttt{scripts/compare\_filters.py} in this repository. Static Std is
-measured over the static-hold segment; the project's static-pose target
-(Section~\ref{sec:calibration-target}) is $\leq 3$--$5^\circ$. Step Lag
-is the delay to reach the step's new value; RMSE is over the full
-400-sample signal, which necessarily penalizes higher-lag filters during
-the sinusoidal segment. $\downarrow$ lower is better.}
+\caption{Filter comparison on the synthetic $30$~Hz static/step/sinusoid
+benchmark. Static Std is measured over the static-hold segment against
+the project's $\leq 3$--$5^\circ$ target. RMSE is computed over the full
+signal including the sinusoidal segment. $\downarrow$ lower is better.}
 \label{tab:filters}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
-Filter & Static Std $\downarrow$ & Noise Red. & Step Lag $\downarrow$ & RMSE $\downarrow$ \\
+Filter & Static Std $\downarrow$ & Noise Red. & Step Lag $\downarrow$ & RMSE \\
        & (\textdegree) & (\%) & (ms) & (\textdegree) \\
 \midrule
-Moving Avg.\ (W=5)   & 1.46 & 57.2 & 133.3 & 6.07 \\
-Moving Avg.\ (W=9)   & 1.01 & 70.5 & 266.7 & 10.35 \\
-Savitzky-Golay (11,3) & 2.89 & 15.3 & 33.3  & 3.43 \\
-Kalman (responsive)  & \textbf{0.55} & 83.8 & \textbf{0.0} & 17.70 \\
-Kalman (balanced)    & \textbf{0.55} & 84.0 & \textbf{0.0} & 19.88 \\
-Kalman (smooth)      & \textbf{0.55} & \textbf{84.0} & \textbf{0.0} & 20.81 \\
+Moving Avg.\ ($W{=}5$)   & 1.46 & 57.2 & 133.3 & 6.07 \\
+Moving Avg.\ ($W{=}9$)   & 1.01 & 70.5 & 266.7 & 10.35 \\
+Savitzky-Golay (11,3)    & 2.89 & 15.3 & 33.3  & 3.43 \\
+Kalman (responsive)      & \textbf{0.55} & 83.8 & \textbf{0.0} & 17.70 \\
+Kalman (balanced)        & \textbf{0.55} & 84.0 & \textbf{0.0} & 19.88 \\
+Kalman (smooth)          & \textbf{0.55} & \textbf{84.0} & \textbf{0.0} & 20.81 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -491,58 +425,49 @@ Kalman (smooth)      & \textbf{0.55} & \textbf{84.0} & \textbf{0.0} & 20.81 \\
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{figures/filter_comparison.png}
-\caption{Filter response comparison generated by
-\texttt{scripts/compare\_filters.py} on the synthetic static/step/sinusoid
-benchmark signal described in Section~\ref{sec:results-filters}.}
+\caption{Filter responses on the synthetic static/step/sinusoid benchmark
+of Section~\ref{sec:results-filters}.}
 \label{fig:filters}
 \end{figure}
 
-All six configurations meet the $\leq 3$--$5^\circ$ static-pose variance
-target from Section~\ref{sec:calibration-target}; the Kalman filter meets
-it with roughly a third of the moving average's static standard
-deviation and with negligible step-response lag, because its velocity
-state extrapolates through the step rather than averaging across it. The
-Kalman filter's RMSE over the \emph{full} signal is nonetheless the
-highest of the six: the benchmark's RMSE is computed over the whole
-400-sample signal including the sinusoidal-tracking segment, and a
-responsive filter that tracks a fast-moving true signal closely still
-accumulates squared error from following genuine motion, whereas a
-heavily lagged filter can appear to have lower RMSE on a bounded
-sinusoid purely by under-reacting; Savitzky-Golay's intermediate RMSE
-reflects the same tradeoff at a different point on the smoothness/lag
-curve. This is exactly the ablation discipline described in
-Section~\ref{sec:filtering}: filter choice is a lag/smoothness tradeoff,
-not a single scalar to be minimized, and the right operating point
-depends on whether the downstream use case (visual smoothness for an
-avatar vs.\ fast-changing calibration reference for an exoskeleton
-controller) values lag or noise rejection more.
+Every configuration satisfies the $\pm3$--$5^\circ$ static-pose target.
+The Kalman filter reaches it with roughly a third of the five-sample
+moving average's static deviation and no measurable step lag, because its
+velocity state extrapolates through the transition instead of averaging
+across it. Its full-signal RMSE is nonetheless the highest of the six.
+This is not a contradiction but a property of the metric: RMSE here spans
+the sinusoidal segment, where a responsive filter accumulates error from
+faithfully following genuine motion while a heavily lagged filter can
+score lower simply by under-reacting to a bounded oscillation.
+Savitzky-Golay sits between the two extremes on both axes. Filter choice
+is therefore a lag/smoothness trade-off rather than a scalar to minimize,
+and the correct operating point depends on whether the consumer values
+visual smoothness (avatar rendering) or fast-changing fidelity (a
+controller reference).
 
-\section{Results: Occlusion Robustness}
+\subsection{Occlusion Robustness}
 \label{sec:results-occlusion}
-
-\texttt{src/evaluation/occlusion\_test.py --synthetic} generates 3{,}000
-frames of synthetic ground truth (independent sinusoidal trajectories per
-DOF, not tied to any external dataset), simulates each framework's raw
-predictions as ground truth plus a literature-calibrated Gaussian noise
-profile per DOF (the same profiles used by the pipeline's own synthetic
-smoke tests, not measurements of the actual frameworks), then randomly
-occludes a fraction of frames and applies zero-order hold -- the same
-behavior the live pipeline exhibits when a pose estimator returns no
-detection. We ran this script in this repository; Table~\ref{tab:occlusion}
-reports its output.
+\texttt{occlusion\_test.py --synthetic} generates 3{,}000 frames of
+synthetic ground truth (independent per-DOF sinusoids), simulates each
+estimator's raw output as ground truth plus a literature-calibrated
+per-DOF Gaussian noise profile, occludes a fraction of frames at random,
+and applies zero-order hold -- the behavior the live pipeline exhibits
+when the estimator returns no detection. Table~\ref{tab:occlusion} and
+Fig.~\ref{fig:occlusion} report the outcome. These noise profiles are
+literature-calibrated approximations, not measurements of the three
+frameworks, so this experiment characterizes pipeline mechanics under
+data loss, not relative estimator accuracy.
 
 \begin{table}[t]
 \centering
-\caption{Synthetic occlusion-robustness benchmark
-(\texttt{occlusion\_test.py --synthetic}, $n=3{,}000$ frames, literature-calibrated
-per-framework noise profiles, MEDIAN over independent sinusoidal
-DOF trajectories). Drift is the mean $|\Delta|$ between the held estimate
-and the true (unoccluded) value during occluded frames -- it is not
-computed at 0\% occlusion by construction.}
+\caption{Synthetic occlusion robustness ($n=3{,}000$ frames,
+literature-calibrated noise profiles). Drift is the mean absolute
+deviation of the held estimate from the true value during occluded frames
+and is undefined at 0\% occlusion.}
 \label{tab:occlusion}
 \begin{tabular}{@{}llcccc@{}}
 \toprule
-Framework & Occ.\ & Hold & MAE & RMSE & Drift \\
+Simulated profile & Occ.\ & Hold & MAE & RMSE & Drift \\
  & (\%) & (\%) & (\textdegree) & (\textdegree) & (\textdegree) \\
 \midrule
 MediaPipe & 0  & 0.0  & 2.59 & 3.26 & --   \\
@@ -563,53 +488,38 @@ PoseNet & 75 & 74.7 & 7.04 & 8.93 & 7.38 \\
 \end{tabular}
 \end{table}
 
-MAE and RMSE stay essentially flat as the occlusion rate rises, by
-construction: zero-order hold repeats the last valid estimate, which for
-a slowly varying sinusoidal ground-truth trajectory is usually still
-close to the true value, so an unconditional MAE against ground truth
-does not surface the degradation. Drift -- the mean absolute distance
-between the held (stale) estimate and the true value specifically during
-occluded frames -- is the metric that does surface it, and it grows
-close to linearly with the occlusion rate for all three simulated
-frameworks, as expected for hold-based dead-reckoning under a moving
-target. We report this contrast deliberately: it is a concrete
-illustration of Section~\ref{sec:eval-harness}'s point that the choice of
-metric, not only the underlying system, determines what a benchmark
-appears to show, mirroring the same lesson we apply to the temporal
-filter benchmark in Section~\ref{sec:results-filters}.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/occlusion_robustness.png}
+\caption{Synthetic occlusion-robustness results
+(Section~\ref{sec:results-occlusion}).}
+\label{fig:occlusion}
+\end{figure}
 
-\subsection{Static-Pose Calibration Target}
-\label{sec:calibration-target}
-The project's static-pose stability target -- angle variance within
-approximately $\pm3$--$5^\circ$ after filtering (from the original
-project specification's Month-4 requirement) -- is the threshold plotted
-in Table~\ref{tab:filters}. All filter configurations we tested meet it
-on the synthetic static-hold segment; Section~\ref{sec:limitations}
-discusses why this does not by itself establish real-camera accuracy.
+MAE and RMSE remain essentially flat as occlusion rises to 75\%, which is
+a property of the metric rather than evidence of robustness: zero-order
+hold repeats the last valid estimate, and against a slowly varying
+trajectory a stale value is usually still close to the truth, so an
+unconditional error average absorbs the loss. Drift -- the deviation
+measured specifically over held frames -- grows close to linearly with
+the occlusion rate for all three profiles, as expected of hold-based
+dead reckoning against a moving target. We report both because the
+contrast is the actionable result: a system evaluated only on aggregate
+MAE would appear insensitive to tracking loss that drift exposes
+immediately.
 
-\section{Results: End-to-End Verification on a Real Photograph}
+\subsection{End-to-End Verification on a Real Photograph}
 \label{sec:results-real-frame}
+The preceding experiments exercise the solver mathematics and pipeline
+mechanics but not the neural estimator on real imagery. To close that
+gap without dataset-scale access (Section~\ref{sec:dataset-access}), we
+ran the real MediaPipe Pose Landmarker -- the same
+\texttt{MediaPipeRunner} used throughout -- on one real photograph: frame
+50 of the CMU Panoptic Studio sequence \texttt{171204\_pose1\_sample}
+\cite{joo2015panoptic}, used strictly as an input image. Image decoding,
+inference, torso-frame construction, bilateral decomposition, and the
+Kalman update execute together, producing:
 
-Sections~\ref{sec:results-tests}--\ref{sec:results-occlusion} exercise
-the angle-solver mathematics and the filter/occlusion pipeline mechanics,
-but not the actual pose-estimation network on real image data. To close
-that gap without a full dataset (Section~\ref{sec:dataset-access}), we
-ran the real MediaPipe Pose Landmarker -- the identical
-\texttt{MediaPipeRunner} class described in Section~\ref{sec:eval-harness}
--- on one real, non-synthetic photograph: frame 50 of the CMU Panoptic
-Studio sequence \texttt{171204\_pose1\_sample} \cite{joo2015panoptic},
-reused here strictly as an input image for a code-path smoke test (the
-corresponding 3D ground truth and temporal-alignment procedure needed to
-turn this into an accuracy number are not used). This is not a dataset
-benchmark -- it is a single real image confirming that image decoding,
-model inference, the torso-frame construction, the bilateral angle
-decomposition, and the Kalman filter update all execute correctly
-together outside the synthetic-input tests of
-Section~\ref{sec:results-tests}.
-
-Running \texttt{python -m scripts.verify\_real\_frame} in this repository
-loads the $1920\times1080$ image, obtains 33 real MediaPipe landmarks
-(not synthetic), and produces:
 \begin{center}
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
@@ -620,81 +530,64 @@ Left  & $-130.64$ & $71.76$ & $136.96$ & $34.02$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-with both sides' rotation flagged reliable ($\text{elbow flexion} \geq
-25^\circ$ on both arms) and the subsequent Kalman filter update
-succeeding. This is a real, non-simulated output of the shipped pipeline,
-and it is qualitatively consistent with the pose actually present in the
-source frame: the companion methodology this pipeline shares with
-\cite{joo2015panoptic}-based validation work describes this exact frame
-as showing the subject in a near-full lateral abduction, and both arms'
-abduction here ($79.74^\circ$ and $71.76^\circ$) are close to that
-description; Fig.~\ref{fig:realframe} shows the annotated overlay this
-run produced. We report this as a qualitative sanity check, not a
-quantitative accuracy result -- there is no ground-truth angle for this
-frame in this repository to compare against, and a single frame cannot
-establish an error distribution in any case.
+
+Rotation is flagged reliable on both sides (elbow flexion exceeds the
+$25^\circ$ gate), and the filter update succeeds. The measured abduction
+values ($79.7^\circ$ and $71.8^\circ$) are consistent with the pose
+visible in Fig.~\ref{fig:realframe}, in which both arms are raised
+laterally near shoulder height. This is a qualitative code-path
+verification, not an accuracy measurement: no ground-truth angle for this
+frame is used, and one frame cannot characterize an error distribution.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{figures/real_frame_overlay.jpg}
 \caption{Real MediaPipe landmarks (shoulders, elbows, wrists, hips)
-overlaid on the CMU Panoptic Studio sample frame described in
-Section~\ref{sec:results-real-frame}, as produced by
-\texttt{scripts/verify\_real\_frame.py} in this repository. The
+overlaid on the input frame of Section~\ref{sec:results-real-frame}. The
 subject is a Panoptic Studio capture participant included in that
 dataset's public research release \cite{joo2015panoptic}, not a
-participant recruited for this project.}
+participant recruited for this work.}
 \label{fig:realframe}
 \end{figure}
 
-\subsection{A Reproducibility Note on the MediaPipe Runtime}
-Running this verification also surfaced a genuine environment finding we
-consider worth recording rather than silently working around. The
-\texttt{mediapipe} version resolved by \texttt{pip install mediapipe} at
-the time of this work (1.0.1) no longer ships the legacy
-\texttt{mediapipe.solutions} Python API that \texttt{MediaPipeRunner}
-tries first; the code's existing fallback to the newer Tasks API
-(Section~\ref{sec:eval-harness}'s \texttt{PoseEstimator} implementation,
-written precisely to handle this version skew) then failed for an
-unrelated reason -- the Tasks API's native C bindings dynamically load
-\texttt{libEGL.so.1} and \texttt{libGLESv2.so.2} (system OpenGL
-ES/EGL libraries) even for CPU-only inference, and neither was present
-in the base development container. Installing \texttt{libegl1} and
-\texttt{libgles2} resolved this, after which the runner initialized and
-ran inference correctly. We record the exact failure and fix here because a
-version-skew or missing-system-library failure in a pose-estimation
-dependency is a reproducibility hazard worth documenting precisely for
-the next person deploying this code, not a one-off annoyance to fix and
-forget.
+\subsection{Deployment Note: Runtime Dependencies}
+The same verification surfaced two reproducibility hazards worth
+recording. First, \texttt{mediapipe} 1.0.1 no longer ships the legacy
+\texttt{mediapipe.solutions} API, so code written against it must fall
+back to the Tasks API. Second, the Tasks API's native bindings load
+\texttt{libEGL.so.1} and \texttt{libGLESv2.so.2} even for CPU-only
+inference; on a headless container lacking those system libraries,
+initialization fails with an error that names a graphics library rather
+than the actual cause. Installing \texttt{libegl1} and \texttt{libgles2}
+resolves it. Relatedly, the Tasks API requires strictly increasing frame
+timestamps, which an integer-millisecond clock violates when consecutive
+frames are processed within the same millisecond -- as happens in offline
+loops over pre-extracted frames -- so the runner enforces monotonicity
+explicitly.
 
-\section{Dataset Access and Reproducing Real-Data Validation}
+\section{Discussion and Limitations}
+\label{sec:limitations}
+
+\subsection{Validation Scope}
 \label{sec:dataset-access}
+All results in Section~\ref{sec:results} are analytic checks on exactly
+known geometry, synthetic-signal benchmarks with literature-calibrated
+noise, or single-image code-path verification. None is a measurement of
+MediaPipe, MoveNet, or PoseNet accuracy on real video against 3D ground
+truth. That comparison requires Human3.6M \cite{ionescu2014human36m},
+whose registration at \url{vision.imar.ro} we did not complete, or CMU
+Panoptic Studio \cite{joo2015panoptic}, whose data server
+(\texttt{domedb.perception.cs.cmu.edu}) was unreachable from our
+development environment: both a plain GET and the HTTPS CONNECT tunnel
+returned HTTP 403 under that environment's outbound network policy, while
+other hosts remained reachable at the same time, indicating a
+host-specific block rather than a connectivity failure. We report the
+absence rather than substituting an unverified figure, because the
+distinction between a measured and an assumed error is precisely what a
+calibration reference must preserve.
 
-Human3.6M \cite{ionescu2014human36m} requires researcher registration at
-\url{vision.imar.ro}; that registration path was not completed for this
-study. CMU Panoptic Studio \cite{joo2015panoptic} distributes a subset of
-sequences without a registration gate, so we attempted to fetch a sample
-sequence directly from the data server
-(\texttt{domedb.perception.cs.cmu.edu}) from the development environment
-used for this work. The request was rejected at the network layer (HTTP
-403 on both a plain GET and the HTTPS CONNECT tunnel) by that
-environment's outbound network policy, which is more restrictive than
-general internet access -- unrelated repositories and GitHub-hosted
-content over HTTPS were reachable from the same environment at the same
-time, confirming the block was specific to that host rather than a
-general connectivity failure. We report this rather than substituting a
-different, unverified number, consistent with the authenticity standard
-Section~\ref{sec:eval-harness} sets for the rest of this paper.
-
-\label{sec:reproducing}
-The evaluation harness that would consume such data is not hypothetical:
-it is delivered in full in this repository and is exercised end to end
-by the passing synthetic-mode tests of Section~\ref{sec:results-tests}
-and the requirement (enforced by \texttt{report\_export.py}'s metadata
-and the \texttt{SYNTHETIC\_WARNING} banner) that only real, live-mode
-predictions may be reported as \texttt{publication\_grade}. With access
-to either dataset, the same numbers this paper's structure anticipates
-can be produced with:
+The harness for that comparison is complete and shipped. With either
+dataset available, results are produced by
 \begin{verbatim}
 python -m scripts.evaluate_h36m \
   --h36m_dir data/dataset/h3.6m/dataset \
@@ -702,132 +595,92 @@ python -m scripts.evaluate_h36m \
   --mode live \
   --frameworks mediapipe movenet_lightning posenet
 \end{verbatim}
-or, for the non-registration-gated Panoptic Studio substitute:
+or, for the Panoptic substitute,
 \begin{verbatim}
 python -m scripts.evaluate_panoptic \
   --sequence_dir <extracted_panoptic_sequence> \
   --camera 00_00 \
   --frameworks mediapipe movenet_lightning posenet
 \end{verbatim}
-Both scripts run the real pose estimators frame by frame, compute the
-metrics of Section~\ref{sec:eval-harness}, run the full statistical
-protocol, and export a reproducibility record (library versions, git
-commit, random seed, and a \texttt{publication\_grade} flag) alongside
-the results, so that a future run's numbers are independently checkable
-rather than only trusted.
+Both run the real estimators frame by frame, compute the metrics of
+Section~\ref{sec:eval-harness}, execute the full statistical protocol,
+and export a reproducibility record (library versions, git commit, random
+seed, and the publication-grade flag) alongside the results. The Panoptic
+path additionally runs a correlation-based temporal-alignment check
+before scoring, since video and separately reconstructed motion-capture
+streams paired by frame index are not guaranteed to share a common start.
 
-\section{Discussion and Limitations}
-\label{sec:limitations}
+\subsection{Geometric and Modeling Limits}
+\textbf{Flexion near full abduction.} As $\theta_{abd}\to90^\circ$, both
+$v_y$ and $v_z$ in $\theta_{flex}=\operatorname{atan2}(-v_z,-v_y)$
+approach zero, making flexion acutely noise-sensitive. This is an
+unavoidable coordinate pole of any two-angle parameterization of a
+direction vector -- the rotational analogue of longitude at the
+geographic poles -- and predicts degraded flexion accuracy specifically
+near full abduction, independent of tracking quality.
 
-\textbf{No real-camera or real-dataset accuracy claim is made.} Every
-number in Sections~\ref{sec:results-tests}--\ref{sec:results-occlusion}
-is either an analytic correctness check on synthetic, exactly-known
-geometry, or a benchmark against a synthetic signal with
-literature-calibrated (not measured) per-framework noise. None of them
-substitutes for the real-dataset validation described in
-Section~\ref{sec:dataset-access}, which this environment could not
-produce. A reader should treat the synthetic occlusion and filter
-numbers as evidence the \emph{pipeline mechanics} behave as designed
-(filters reduce jitter, holds drift as expected, metrics respond to
-noise in the expected direction), not as an accuracy claim about
-MediaPipe, MoveNet, or PoseNet on real video.
+\textbf{Rotation observability.} The forearm-proxy rotation estimate is
+meaningful only above the elbow-flexion gate. Any monocular system using
+a comparable proxy inherits this limit, and evaluations should report the
+fraction of frames on which the estimate was geometrically valid rather
+than an unconditional error.
 
-\textbf{Flexion-angle singularity.} The ZXY decomposition's second
-singularity, noted in Section~\ref{sec:angles}, occurs as
-$\theta_{abd}\to90^\circ$: both $v_y$ and $v_z$ in
-$\theta_{flex}=\operatorname{atan2}(-v_z,-v_y)$ approach zero
-simultaneously, so flexion becomes acutely sensitive to small measurement
-noise near full abduction. This is an unavoidable coordinate pole for any
-two-angle parameterization of a direction vector (the rotational analogue
-of longitude's degeneracy at the geographic poles), not a bug, but it
-means flexion accuracy should be expected to degrade specifically during
-near-full-abduction poses independent of tracking quality.
-
-\textbf{Rotation observability.} The forearm-proxy method for shoulder
-rotation (Section~\ref{sec:angles}) is, by construction, only meaningful
-above the elbow-flexion reliability threshold; any monocular system using
-a comparable proxy inherits the same limitation, and any evaluation of it
-should report the fraction of frames for which the estimate was
-geometrically valid rather than an unconditional error.
-
-\textbf{Depth ambiguity.} MediaPipe's pseudo-3D $z$ coordinate is a
-relative depth estimate from a single image and is used only where
-strictly necessary (the coordinate frame itself is built entirely from
-in-image-plane vectors); MoveNet and PoseNet provide no depth channel at
-all and are padded with zero-visibility placeholders for the corresponding
-entries, meaning their angle estimates rely more heavily on the 2D
+\textbf{Depth ambiguity.} MediaPipe's pseudo-3D $z$ is a monocular
+relative-depth estimate; MoveNet and PoseNet supply no depth at all.
+Angle estimates from the latter two therefore rest more heavily on the 2D
 projection and should be expected to be more view-dependent.
 
-\textbf{Simplified kinematic model.} The arm is modeled as a two-link
-rigid chain (upper arm, forearm) with a single-DOF elbow and a
-3-DOF-via-proxy shoulder, following \cite{koritnik2003kinematic} and
-\cite{biryukova2000kinematics}; this is adequate for a real-time
-avatar-control and calibration-reference signal but is not a
-biomechanically complete model of the shoulder complex (no separate
-scapulohumeral rhythm, no clavicular elevation).
+\textbf{Kinematic simplification.} The arm is modeled as two rigid
+segments with a one-DOF elbow and a three-DOF shoulder, one of which is
+proxied. This suffices for avatar control and reference signaling but
+omits scapulohumeral rhythm and clavicular elevation, and is not a
+biomechanically complete shoulder model.
 
-\textbf{Scope of the exoskeleton-calibration claim.} We designed the
-calibration module (Section~\ref{sec:calibration}) to be structurally
-reusable for exoskeleton sensor calibration -- the same affine per-DOF
-map from a small set of reference poses -- but no wearable exoskeleton
-was available to validate that reuse in practice; this is future work,
-consistent with the original project specification's framing of this
-system as a foundational platform rather than a finished
-exoskeleton-calibration product.
+\textbf{Exoskeleton integration.} The calibration module is structured
+for reuse in exoskeleton sensor alignment, but no device was available to
+validate that reuse; that remains future work.
 
 \section{Conclusion}
-We presented a monocular vision-based framework for anatomically
-consistent, bilateral shoulder and elbow joint-angle estimation, temporal
-filtering, calibration, and real-time Unity avatar control, with a
-complete mathematical derivation of the torso-frame construction, the
-ZXY angle decomposition, and all three temporal filters. Every
-quantitative result in this paper -- 50 passing correctness tests, a
-synthetic filter benchmark, and a synthetic occlusion-robustness study --
-was generated by running the delivered code in this repository during
-this work, and we report explicitly, rather than paper over, that
-real-dataset validation against Human3.6M or CMU Panoptic Studio was not
-possible from the development environment used here because both data
-sources were unreachable (one by registration gate, one by network
-policy). The complete, unmodified evaluation harness capable of producing
-that validation -- identical metric definitions, statistical protocol,
-and publication-grade labeling discipline used throughout this paper -- is
-part of the delivered repository, so that real-data validation is a
-single documented command away rather than a rewrite. We regard the
-explicit separation between what this paper measured and what its
-harness is designed to measure as itself a necessary property of an
-authentic research paper in this space, not a limitation to be minimized.
+We presented MonoArm, a monocular framework producing anatomically
+consistent bilateral shoulder and elbow joint angles for real-time avatar
+control, with full derivations of the torso frame, the ZXY decomposition
+and its deliberate choice of singularity placement, the gated rotation
+proxy, three causal filters, and a bounded-gain calibration. On a
+synthetic benchmark the two-state Kalman filter achieved $0.55^\circ$
+static deviation with no measurable step lag, and a 55-case analytic
+suite verifies the solver, frame construction, filters, calibration
+guards, and cross-framework keypoint remapping. Real-image inference
+confirms the complete path executes end to end and yields angles
+consistent with the observed pose. Accuracy against large-scale 3D
+motion-capture ground truth remains unmeasured in this work because
+neither reference dataset was reachable from our environment; the
+evaluation harness, metric definitions, statistical protocol, and
+alignment checks required for that comparison are delivered with the
+system, making it a single documented command rather than a
+reimplementation. Completing that validation, and then closing the loop
+against a physical exoskeleton's joint encoders, are the natural next
+steps.
 
 \section*{Data and Code Availability}
-All angle-solver, filter, calibration, streaming, and evaluation code
-described in this paper, the Unity project, and the 50-test suite that
-produced Section~\ref{sec:results-tests}'s results are part of this
-repository (\texttt{python/} and \texttt{unity/}). The filter-benchmark
-and occlusion-robustness figures (Figs.~\ref{fig:filters}--\ref{fig:occlusion})
-are regenerated verbatim by \texttt{python -m scripts.compare\_filters}
-and \texttt{python -m src.evaluation.occlusion\_test --synthetic}
-respectively; Fig.~\ref{fig:realframe} is regenerated by
-\texttt{python -m scripts.verify\_real\_frame}. No dataset requiring a
-license or registration was used to produce any number in this paper.
-The single real photograph used in Section~\ref{sec:results-real-frame}
+All angle-solver, filter, calibration, streaming, and evaluation code,
+the Unity project, and the 55-case test suite are part of this repository
+(\texttt{python/}, \texttt{unity/}). Figures~\ref{fig:filters},
+\ref{fig:occlusion}, and \ref{fig:realframe} are regenerated by
+\texttt{python -m scripts.compare\_filters},
+\texttt{python -m src.evaluation.occlusion\_test --synthetic}, and
+\texttt{python -m scripts.verify\_real\_frame} respectively. No
+license- or registration-gated dataset was used to produce any number
+reported here. The single photograph in
+Section~\ref{sec:results-real-frame}
 (\texttt{docs/paper/figures/panoptic\_171204\_pose1\_sample\_frame50.jpg})
-is frame 50 of the CMU Panoptic Studio sequence
-\texttt{171204\_pose1\_sample}, distributed by the dataset maintainers as
-``freely available for non-commercial and research purpose only,''
-conditional on citing at least one paper describing the dataset; we
-satisfy this by citing Joo~\textit{et al.}~\cite{joo2015panoptic}. The
-subject is a data-collection participant included in that public
-release, not a participant recruited for this project, and the image is
-used here strictly as a code-path verification input, not as training or
-benchmark data.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/occlusion_robustness.png}
-\caption{Synthetic occlusion-robustness benchmark generated by
-\texttt{src/evaluation/occlusion\_test.py --synthetic} in this
-repository (Section~\ref{sec:results-occlusion}).}
-\label{fig:occlusion}
-\end{figure}
+is frame 50 of CMU Panoptic Studio sequence
+\texttt{171204\_pose1\_sample}, distributed by its maintainers as
+``freely available for non-commercial and research purpose only''
+conditional on citing a paper describing the dataset, satisfied here by
+citing Joo~\textit{et al.}~\cite{joo2015panoptic}. The subject is a
+participant in that public data-collection release, not a participant
+recruited for this work, and the image serves solely as a code-path
+verification input.
 
 \begin{thebibliography}{00}
 
@@ -850,7 +703,8 @@ Grundmann, ``BlazePose: On-device real-time body pose tracking,''
 
 \bibitem{movenet2021blog}
 R. Votel and N. Li, ``Next-generation pose detection with MoveNet and
-TensorFlow.js,'' \textit{TensorFlow Blog}, May 2021.
+TensorFlow.js,'' \textit{TensorFlow Blog}, May 2021. [Online]. Available:
+\url{https://blog.tensorflow.org/2021/05/next-generation-pose-detection-with-movenet-and-tensorflowjs.html}
 
 \bibitem{papandreou2018personlab}
 G. Papandreou, T. Zhu, L.-C. Chen, S. Gidaris, J. Tompson, and K. Murphy,
@@ -871,8 +725,9 @@ recordings,'' \textit{J. Biomech.}, vol. 33, no. 8, pp. 985--995, 2000.
 
 \bibitem{koritnik2003kinematic}
 T. Koritnik, T. Bajd, and M. Munih, ``A simple kinematic model of a human
-body for virtual environments,'' presented at the workshop cited in the
-project's reference material.
+body for virtual environments,'' Faculty of Electrical Engineering,
+University of Ljubljana. [Online]. Available:
+\url{https://www.researchgate.net/publication/226438496}
 
 \bibitem{kalman1960new}
 R. E. Kalman, ``A new approach to linear filtering and prediction
