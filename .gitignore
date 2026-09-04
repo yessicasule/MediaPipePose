@@ -8,6 +8,10 @@ __pycache__/
 python/outputs/
 python/data/
 python/.venv/
+PoseTrack/data/
+PoseTrack/outputs/
+PoseTrack/benchmarks/results/
+outputs/
 
 # Unity
 unity/UnityMedia/Library/
@@ -17,3 +21,8 @@ unity/UnityMedia/Build/
 unity/UnityMedia/Builds/
 unity/UnityMedia/Logs/
 unity/UnityMedia/UserSettings/
+unity/UnityMedia/Assets/TextMesh Pro/
+unity/UnityMedia/Assets/TextMesh Pro.meta
+
+# Local/per-machine tool settings
+.claude/settings.local.json
