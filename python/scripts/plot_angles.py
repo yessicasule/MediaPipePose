@@ -1,7 +1,8 @@
 """
 Post-session joint angle plotter.
 
-Reads angles.csv saved by run_capture_session.py and produces a figure with:
+Reads a session CSV written by scripts/run_demo.py (CsvAngleLogger) or by
+src/main.py, and produces a figure with:
   - Raw vs filtered overlay per joint
   - ±3 deg variance band around the filtered mean (the Month-4 target)
   - Per-joint statistics (mean, std, detection rate)
@@ -44,6 +45,21 @@ _JOINTS = [
 ]
 
 
+_FALLBACKS = {
+    "shoulder_flexion":   "shoulder_elevation",
+    "shoulder_rotation":  "shoulder_yaw",
+    "shoulder_abduction": "shoulder_roll",
+}
+
+
+def _name_variants(key: str) -> list[str]:
+    """Column base names for a joint, newest naming first."""
+    names = [key, f"right_{key}"]
+    if key in _FALLBACKS:
+        names += [_FALLBACKS[key], f"right_{_FALLBACKS[key]}"]
+    return names
+
+
 def load_csv(csv_path: Path) -> dict:
     rows = []
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -54,27 +70,47 @@ def load_csv(csv_path: Path) -> dict:
     if not rows:
         raise RuntimeError(f"Empty CSV: {csv_path}")
 
-    elapsed = np.array([float(r["elapsed_s"]) for r in rows])
-    detected = np.array([int(r["pose_detected"]) for r in rows])
+    header = rows[0]
+
+    time_col = next((c for c in ("elapsed_s", "timestamp_s") if c in header), None)
+    if time_col is None:
+        raise RuntimeError(
+            f"{csv_path} has no 'elapsed_s' or 'timestamp_s' column. "
+            f"Columns present: {', '.join(header)}"
+        )
+    elapsed = np.array([float(r[time_col]) for r in rows])
+
+    # CsvAngleLogger only writes rows for frames where a pose was detected.
+    if "pose_detected" in header:
+        detected = np.array([int(r["pose_detected"]) for r in rows])
+    else:
+        detected = np.ones(len(rows), dtype=int)
 
     data = {"elapsed": elapsed, "detected": detected, "n": len(rows)}
-    
-    _FALLBACKS = {
-        "shoulder_flexion": "shoulder_elevation",
-        "shoulder_rotation": "shoulder_yaw",
-        "shoulder_abduction": "shoulder_roll",
-    }
 
+    has_raw = False
     for key, *_ in _JOINTS:
-        raw_key = f"{key}_raw"
-        filt_key = f"{key}_filt"
-        if rows and raw_key not in rows[0] and key in _FALLBACKS:
-            fb = _FALLBACKS[key]
-            raw_key = f"{fb}_raw"
-            filt_key = f"{fb}_filt"
-            
+        raw_key = filt_key = None
+        for name in _name_variants(key):
+            if f"{name}_raw" in header and f"{name}_filt" in header:
+                raw_key, filt_key = f"{name}_raw", f"{name}_filt"
+                has_raw = True
+                break
+
+        if raw_key is None:
+            # Single already-filtered series (CsvAngleLogger).
+            col = next((n for n in _name_variants(key) if n in header), None)
+            if col is None:
+                raise RuntimeError(
+                    f"{csv_path} has no column for '{key}'. "
+                    f"Columns present: {', '.join(header)}"
+                )
+            raw_key = filt_key = col
+
         data[f"{key}_raw"]  = np.array([float(r[raw_key])  for r in rows])
         data[f"{key}_filt"] = np.array([float(r[filt_key]) for r in rows])
+
+    data["has_raw"] = has_raw
     return data
 
 
@@ -85,14 +121,16 @@ def load_csv(csv_path: Path) -> dict:
 _VARIANCE_TARGET_DEG = 3.0   # Month-4 spec: ±3 deg on static pose
 
 
-def _plot_joint(ax, elapsed, raw, filt, colour, title, detected):
+def _plot_joint(ax, elapsed, raw, filt, colour, title, detected, has_raw=True):
     mask = detected.astype(bool)
 
-    # Raw trace — muted
-    ax.plot(elapsed, raw, color=colour, alpha=0.25, linewidth=0.8, label="Raw")
+    if has_raw:
+        # Raw trace — muted
+        ax.plot(elapsed, raw, color=colour, alpha=0.25, linewidth=0.8, label="Raw")
 
     # Filtered trace — solid
-    ax.plot(elapsed, filt, color=colour, linewidth=1.6, label="Filtered")
+    ax.plot(elapsed, filt, color=colour, linewidth=1.6,
+            label="Filtered" if has_raw else "Logged")
 
     # ±3 deg band around filtered mean (detected frames only)
     if mask.any():
@@ -102,11 +140,14 @@ def _plot_joint(ax, elapsed, raw, filt, colour, title, detected):
                    color=colour, alpha=0.08, label=f"±{_VARIANCE_TARGET_DEG}° target")
         ax.axhline(mean_filt, color=colour, linewidth=0.7, linestyle="--", alpha=0.5)
 
-        std_raw  = float(np.std(raw[mask]))
         std_filt = float(np.std(filt[mask]))
         det_rate = float(mask.sum()) / len(mask) * 100
-        subtitle = (f"mean {mean_filt:.1f}°  |  "
-                    f"std raw {std_raw:.1f}°  filt {std_filt:.1f}°  |  "
+        if has_raw:
+            std_raw = float(np.std(raw[mask]))
+            std_txt = f"std raw {std_raw:.1f}°  filt {std_filt:.1f}°"
+        else:
+            std_txt = f"std {std_filt:.1f}°"
+        subtitle = (f"mean {mean_filt:.1f}°  |  {std_txt}  |  "
                     f"detect {det_rate:.0f}%")
         ax.set_title(f"{title}\n{subtitle}", fontsize=9, pad=4)
     else:
@@ -133,7 +174,7 @@ def make_figure(data: dict, session_name: str) -> "plt.Figure":
     for ax, (key, title, colour) in zip(axes, _JOINTS):
         _plot_joint(ax, elapsed,
                     data[f"{key}_raw"], data[f"{key}_filt"],
-                    colour, title, detected)
+                    colour, title, detected, data["has_raw"])
 
     axes[-1].set_xlabel("Time (s)", fontsize=8)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
@@ -142,17 +183,23 @@ def make_figure(data: dict, session_name: str) -> "plt.Figure":
 
 def make_comparison_figure(data: dict, session_name: str) -> "plt.Figure":
     """Single panel: raw vs filtered for all four joints on overlaid axes."""
-    fig, (ax_raw, ax_filt) = plt.subplots(2, 1, figsize=(13, 6), sharex=True)
+    has_raw = data["has_raw"]
+    n_panels = 2 if has_raw else 1
+    fig, axes = plt.subplots(n_panels, 1, figsize=(13, 3 * n_panels + 0.5), sharex=True,
+                             squeeze=False)
+    axes = axes[:, 0]
+    ax_filt = axes[-1]
     elapsed  = data["elapsed"]
-    detected = data["detected"].astype(bool)
 
     for key, title, colour in _JOINTS:
-        ax_raw.plot(elapsed, data[f"{key}_raw"],
-                    color=colour, linewidth=0.9, alpha=0.75, label=title)
+        if has_raw:
+            axes[0].plot(elapsed, data[f"{key}_raw"],
+                         color=colour, linewidth=0.9, alpha=0.75, label=title)
         ax_filt.plot(elapsed, data[f"{key}_filt"],
                      color=colour, linewidth=1.4, label=title)
 
-    for ax, label in [(ax_raw, "Raw"), (ax_filt, "Filtered (Kalman/EMA)")]:
+    labels = ["Raw", "Filtered (Kalman/EMA)"] if has_raw else ["Logged angles"]
+    for ax, label in zip(axes, labels):
         ax.set_ylabel("Angle (deg)", fontsize=8)
         ax.set_title(label, fontsize=9)
         ax.grid(True, alpha=0.2)

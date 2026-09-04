@@ -6,37 +6,63 @@
 // without hardcoding bone names or local axes. For bilateral tracking, add
 // two instances of this component to the same Animator, one per side.
 //
-// Muscle Space
-// ------------
-// Unity's Animator / Avatar system normalises all joint rotations into
-// a "muscle space" where each degree of freedom (DOF) maps to a float
-// in the range [−1, +1]:
-//   −1 → minimum joint angle (as configured in the Avatar / T-pose rig)
-//   +1 → maximum joint angle
-//    0 → neutral / rest position
+// Why not muscle space
+// --------------------
+// An earlier version drove Unity's normalised [−1, +1] muscle values, one
+// muscle per incoming angle. That cannot work, and the rig was measured to
+// confirm it: sweeping "Right Arm Down-Up" from −1 to +1 moves BOTH angles
+// (flexion −2°→168°, abduction −11°→63°→29°), and sweeping "Arm Front-Back"
+// likewise moves both. Abduction is non-monotonic in each muscle, so there
+// is no invertible one-to-one map from an angle to a muscle value — a target
+// abduction of 40° has two muscle solutions on the same axis.
 //
-// Anatomical Mapping
-// ------------------
-// We map incoming degrees to muscle values via a configurable linear
-// transform for each DOF:
+// The two shoulder muscles are simply not the same basis as the solver's
+// flexion/abduction decomposition. Rather than fit a coupled 2-D inverse,
+// this component reconstructs the upper-arm and forearm direction vectors
+// analytically (the exact inverse of angle_solver.py) and aligns the bones
+// to them. That is correct by construction and needs no per-rig calibration.
 //
-//   muscle = (angle_deg - neutral_deg) / half_range_deg
+// Elbow and rotation WERE clean single DOFs when measured (elbow: exactly
+// linear, 80° − 80·muscle, fully decoupled; rotation: exactly linear at
+// 90°/unit), but they are reconstructed the same way here for consistency.
 //
-// where neutral_deg is the angle that should map to muscle = 0, and
-// half_range_deg is the degrees from neutral to the +1 extreme.
 //
-// Muscle Indices
+// Reconstruction
 // --------------
-// Muscle names are searched at Awake() via HumanTrait.MuscleName so that
-// the code is not sensitive to Unity version differences in muscle ordering.
-// `side` selects which set of names to search for:
+// For the right arm, angle_solver.py decomposes the unit upper-arm vector
+// v = (x_lateral, y_superior, z_anterior) in the torso frame as
 //
-//   "<Side> Arm Down-Up"      → shoulder abduction / adduction
-//   "<Side> Arm Front-Back"   → shoulder flexion / extension
-//   "<Side> Arm Roll In-Out"  → shoulder internal / external rotation
-//   "<Side> Forearm Stretch"  → elbow flexion
+//   abduction = asin(-vx)          flexion = atan2(-vz, -vy)
+//
+// so a straight-down arm is (0, -1, 0). Inverting that:
+//
+//   vx = -sin(A)   vy = -cos(A)cos(F)   vz = -cos(A)sin(F)
+//
+// The forearm is then placed at the elbow's included angle from the upper
+// arm, swung about it by the rotation angle in the same (e1, e2) basis the
+// solver builds, so decomposing the result returns the same four angles.
+// The left arm is reflected across the sagittal plane (negate x), matching
+// the mirror angle_solver.compute_bilateral_angles() applies.
+//
+// Bones are aligned with Quaternion.FromToRotation, upper arm first, then
+// the forearm (which has moved with its parent).
+//
+// Two consequences, both measured on this rig rather than assumed:
+//
+//   * The Avatar's muscle limits no longer clamp anything. Muscle space tops
+//     out at 160° of elbow flexion; asking this component for 175° yields
+//     exactly 175°. Anatomically impossible input will be rendered faithfully,
+//     so clamp upstream if that matters.
+//
+//   * Writes must happen AFTER the Animator evaluates, which is why
+//     MonoArmManager drives this from LateUpdate. With a clip playing,
+//     applying angles first loses them completely (45/20/90 came back as the
+//     rig's neutral 29.6/41.4/80); applying afterwards preserves them exactly.
+//
+// Note that abduction is only uniquely defined on [-90, +90] — it comes from
+// asin(), so angle_solver.py can never emit anything outside that band, and a
+// value beyond it aliases back (170° reads back as 10°).
 
-using System;
 using UnityEngine;
 
 namespace MonoArm
@@ -57,62 +83,38 @@ namespace MonoArm
         [Range(0.02f, 0.5f)]
         public float smoothTime = 0.08f;
 
-        [Header("Shoulder Flexion (Front-Back)")]
-        [Tooltip("Degrees of flexion that maps to muscle +1. Typical: 120°–180°.")]
-        public float flexionMax  = 150f;
-        [Tooltip("Degrees of extension that maps to muscle -1. Typical: −30° to −60°.")]
-        public float flexionMin  = -30f;
-
-        [Header("Shoulder Abduction (Down-Up)")]
-        [Tooltip("Degrees of abduction (arm up/out) that maps to muscle +1.")]
-        public float abductionMax = 120f;
-        [Tooltip("Degrees of adduction (arm crossing body) that maps to muscle -1.")]
-        public float abductionMin = -20f;
-
-        [Header("Shoulder Rotation (Roll In-Out)")]
-        [Tooltip("Degrees of internal rotation that maps to muscle +1.")]
-        public float rotationMax =  90f;
-        [Tooltip("Degrees of external rotation that maps to muscle -1.")]
-        public float rotationMin = -90f;
-
-        [Header("Elbow Flexion (Forearm Stretch)")]
-        [Tooltip("Degrees of elbow flexion that maps to muscle +1.")]
-        public float elbowMax = 150f;
-
         [Header("Calibration Offsets (degrees)")]
-        [Tooltip("Subtracted from incoming flexion before mapping. Use to zero the neutral pose.")]
+        [Tooltip("Subtracted from incoming flexion before it is applied. Use to zero the neutral pose.")]
         public float flexionOffset   = 0f;
         public float abductionOffset = 0f;
+        [Tooltip("Shoulder rotation is a forearm-proxy angle with no absolute zero — " +
+                 "calibrate this to the subject's neutral-pose reading.")]
         public float rotationOffset  = 0f;
         public float elbowOffset     = 0f;
 
         // ── Private ─────────────────────────────────────────────────────────
 
-        HumanPoseHandler _poseHandler;
-        HumanPose        _pose;
+        Animator  _anim;
+        Transform _upper, _lower, _hand;
+        Transform _lShoulder, _rShoulder, _lHip, _rHip;
+        bool      _ready;
 
-        // Muscle indices resolved at Awake()
-        int _idxFlexion   = -1;
-        int _idxAbduction = -1;
-        int _idxRotation  = -1;
-        int _idxElbow     = -1;
+        // Smoothed angle state (degrees) and SmoothDamp velocities
+        float _sFlex, _sAbd, _sRot, _sElbow;
+        float _vFlex, _vAbd, _vRot, _vElbow;
 
-        // SmoothDamp targets and velocities
-        float _targetFlex, _targetAbd, _targetRot, _targetElbow;
-        float _velFlex,    _velAbd,    _velRot,    _velElbow;
-
-        // Last applied muscle values (for debug display)
-        public float CurrentMuscleFlex   { get; private set; }
-        public float CurrentMuscleAbd    { get; private set; }
-        public float CurrentMuscleRot    { get; private set; }
-        public float CurrentMuscleElbow  { get; private set; }
+        // Last applied angles (for the inspector readout)
+        public float CurrentFlexionDeg   { get; private set; }
+        public float CurrentAbductionDeg { get; private set; }
+        public float CurrentRotationDeg  { get; private set; }
+        public float CurrentElbowDeg     { get; private set; }
 
         // ── Unity Lifecycle ─────────────────────────────────────────────────
 
         void Awake()
         {
-            var anim = GetComponent<Animator>();
-            if (anim == null || !anim.isHuman)
+            _anim = GetComponent<Animator>();
+            if (_anim == null || !_anim.isHuman)
             {
                 Debug.LogError("[AvatarMuscleController] Animator not found or not Humanoid. " +
                                "Set Animation Type to Humanoid in the FBX import settings.");
@@ -120,122 +122,145 @@ namespace MonoArm
                 return;
             }
 
-            _poseHandler = new HumanPoseHandler(anim.avatar, anim.transform);
-            _poseHandler.GetHumanPose(ref _pose);
+            bool right = side == ArmSide.Right;
+            _upper = _anim.GetBoneTransform(right ? HumanBodyBones.RightUpperArm : HumanBodyBones.LeftUpperArm);
+            _lower = _anim.GetBoneTransform(right ? HumanBodyBones.RightLowerArm : HumanBodyBones.LeftLowerArm);
+            _hand  = _anim.GetBoneTransform(right ? HumanBodyBones.RightHand     : HumanBodyBones.LeftHand);
 
-            ResolveMuscleIndices();
-        }
+            _lShoulder = _anim.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+            _rShoulder = _anim.GetBoneTransform(HumanBodyBones.RightUpperArm);
+            _lHip      = _anim.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
+            _rHip      = _anim.GetBoneTransform(HumanBodyBones.RightUpperLeg);
 
-        void OnDestroy()
-        {
-            _poseHandler?.Dispose();
+            _ready = _upper && _lower && _hand && _lShoulder && _rShoulder && _lHip && _rHip;
+            if (!_ready)
+            {
+                Debug.LogError($"[AvatarMuscleController:{side}] Required humanoid bones missing " +
+                               "(upper arm / lower arm / hand / shoulders / hips).");
+                enabled = false;
+                return;
+            }
+
+            Debug.Log($"[AvatarMuscleController:{side}] Bones resolved — driving " +
+                      $"{_upper.name} / {_lower.name} directly.");
         }
 
         // ── Public API ──────────────────────────────────────────────────────
 
         /// <summary>
         /// Apply a set of anatomical arm angles to this controller's arm
-        /// (<see cref="side"/>) muscles. Call this once per frame from
-        /// MonoArmManager, once per side/controller instance.
+        /// (<see cref="side"/>). Call this once per frame from MonoArmManager,
+        /// once per side/controller instance.
         /// </summary>
         /// <param name="angles">Incoming joint angles (degrees) from the UDP receiver.</param>
         public void ApplyAngles(ArmAngles angles)
         {
-            if (_poseHandler == null) return;
-            // enabled==false only stops this component's own Unity messages
-            // (Update, etc.) — MonoArmManager calls ApplyAngles() directly, so a
-            // partially-resolved muscle set (e.g. flexion found but abduction not)
-            // must still be guarded here, or _pose.muscles[-1] throws.
-            if (_idxFlexion < 0 || _idxAbduction < 0 || _idxRotation < 0 || _idxElbow < 0)
-                return;   // muscles not fully resolved
+            if (!_ready) return;
 
-            // Convert degrees → muscle values [-1, +1]
-            float tFlex  = DegreesToMuscle(angles.shoulderFlexion   - flexionOffset,   flexionMin,   flexionMax);
-            float tAbd   = DegreesToMuscle(angles.shoulderAbduction  - abductionOffset, abductionMin, abductionMax);
-            float tRot   = DegreesToMuscle(angles.shoulderRotation   - rotationOffset,  rotationMin,  rotationMax);
-            float tElbow = DegreesToMuscle(angles.elbowFlexion       - elbowOffset,     0f,           elbowMax);
+            float flex  = angles.shoulderFlexion   - flexionOffset;
+            float abd   = angles.shoulderAbduction - abductionOffset;
+            float rot   = angles.shoulderRotation  - rotationOffset;
+            float elbow = angles.elbowFlexion      - elbowOffset;
 
-            // SmoothDamp to target muscle values (frame-rate independent)
+            // Smooth in angle space. SmoothDampAngle wraps correctly at ±180°,
+            // which matters for flexion (arm overhead sits near the wrap).
             float dt = Time.deltaTime;
-            _targetFlex  = Mathf.SmoothDamp(_targetFlex,  tFlex,  ref _velFlex,  smoothTime, Mathf.Infinity, dt);
-            _targetAbd   = Mathf.SmoothDamp(_targetAbd,   tAbd,   ref _velAbd,   smoothTime, Mathf.Infinity, dt);
-            _targetRot   = Mathf.SmoothDamp(_targetRot,   tRot,   ref _velRot,   smoothTime, Mathf.Infinity, dt);
-            _targetElbow = Mathf.SmoothDamp(_targetElbow, tElbow, ref _velElbow, smoothTime, Mathf.Infinity, dt);
+            if (smoothTime > 0f && dt > 0f)
+            {
+                _sFlex  = Mathf.SmoothDampAngle(_sFlex,  flex,  ref _vFlex,  smoothTime, Mathf.Infinity, dt);
+                _sAbd   = Mathf.SmoothDampAngle(_sAbd,   abd,   ref _vAbd,   smoothTime, Mathf.Infinity, dt);
+                _sRot   = Mathf.SmoothDampAngle(_sRot,   rot,   ref _vRot,   smoothTime, Mathf.Infinity, dt);
+                _sElbow = Mathf.SmoothDampAngle(_sElbow, elbow, ref _vElbow, smoothTime, Mathf.Infinity, dt);
+            }
+            else
+            {
+                _sFlex = flex; _sAbd = abd; _sRot = rot; _sElbow = elbow;
+            }
 
-            // Read current full-body pose, patch this side's arm muscles, write back
-            _poseHandler.GetHumanPose(ref _pose);
+            BuildTorsoFrame(out Vector3 tx, out Vector3 ty, out Vector3 tz);
 
-            _pose.muscles[_idxFlexion]   = _targetFlex;
-            _pose.muscles[_idxAbduction] = _targetAbd;
-            _pose.muscles[_idxRotation]  = _targetRot;
-            _pose.muscles[_idxElbow]     = _targetElbow;
+            // Reconstruct the upper-arm direction, then align the bone to it.
+            Vector3 uT = UpperArmDirection(_sFlex, _sAbd);
+            Vector3 fT = ForearmDirection(uT, _sElbow, _sRot);
+            if (side == ArmSide.Left)
+            {
+                // angle_solver mirrors the left arm across the sagittal plane
+                // before decomposing, so undo that reflection here.
+                uT.x = -uT.x;
+                fT.x = -fT.x;
+            }
 
-            _poseHandler.SetHumanPose(ref _pose);
+            Vector3 uW = tx * uT.x + ty * uT.y + tz * uT.z;
+            Vector3 curU = (_lower.position - _upper.position).normalized;
+            if (curU.sqrMagnitude > 1e-12f && uW.sqrMagnitude > 1e-12f)
+                _upper.rotation = Quaternion.FromToRotation(curU, uW) * _upper.rotation;
 
-            // Store for inspector / debug display
-            CurrentMuscleFlex  = _targetFlex;
-            CurrentMuscleAbd   = _targetAbd;
-            CurrentMuscleRot   = _targetRot;
-            CurrentMuscleElbow = _targetElbow;
+            // The forearm bone has moved with its parent — re-read it before aligning.
+            Vector3 fW = tx * fT.x + ty * fT.y + tz * fT.z;
+            Vector3 curF = (_hand.position - _lower.position).normalized;
+            if (curF.sqrMagnitude > 1e-12f && fW.sqrMagnitude > 1e-12f)
+                _lower.rotation = Quaternion.FromToRotation(curF, fW) * _lower.rotation;
+
+            CurrentFlexionDeg   = _sFlex;
+            CurrentAbductionDeg = _sAbd;
+            CurrentRotationDeg  = _sRot;
+            CurrentElbowDeg     = _sElbow;
         }
 
         // ── Private helpers ──────────────────────────────────────────────────
 
         /// <summary>
-        /// Map an angle in degrees to Unity muscle space [−1, +1].
-        /// Clamps to the valid muscle range.
+        /// Build the avatar's torso frame exactly as coordinate_frame.py does:
+        /// y = hips→shoulders, x = toward the subject's LEFT, z = anterior.
+        /// Body-relative, so it is invariant to how the avatar is oriented.
         /// </summary>
-        static float DegreesToMuscle(float angleDeg, float minDeg, float maxDeg)
+        void BuildTorsoFrame(out Vector3 x, out Vector3 y, out Vector3 z)
         {
-            float range  = maxDeg - minDeg;
-            if (Mathf.Abs(range) < 1e-3f) return 0f;
-            float normalised = (angleDeg - minDeg) / range;          // [0, 1]
-            float muscle     = Mathf.Lerp(-1f, 1f, normalised);      // [−1, +1]
-            return Mathf.Clamp(muscle, -1f, 1f);
+            Vector3 hipMid = 0.5f * (_lHip.position + _rHip.position);
+            Vector3 shMid  = 0.5f * (_lShoulder.position + _rShoulder.position);
+
+            y = (shMid - hipMid).normalized;
+            Vector3 xCand = (_lShoulder.position - _rShoulder.position).normalized;
+            Vector3 xOrth = (xCand - Vector3.Dot(xCand, y) * y).normalized;
+            z = Vector3.Cross(xOrth, y).normalized;
+            x = Vector3.Cross(y, z).normalized;
         }
 
-        void ResolveMuscleIndices()
+        /// <summary>
+        /// Inverse of angle_solver._compute_shoulder_angles for the right arm.
+        /// Given flexion and abduction, return the unit upper-arm vector in the
+        /// torso frame. Forward map: abduction = asin(−vx),
+        /// flexion = atan2(−vz, −vy), so a straight-down arm is (0, −1, 0).
+        /// </summary>
+        static Vector3 UpperArmDirection(float flexionDeg, float abductionDeg)
         {
-            // Find each <side>-arm muscle by name substring match.
-            // HumanTrait.MuscleName is consistent across Unity versions.
-            string sideName = side.ToString(); // "Right" or "Left"
-            string[] names = HumanTrait.MuscleName;
-            for (int i = 0; i < names.Length; i++)
-            {
-                string n = names[i];
-                if (n == $"{sideName} Arm Front-Back")  _idxFlexion   = i;
-                else if (n == $"{sideName} Arm Down-Up")     _idxAbduction = i;
-                else if (n.Contains($"{sideName} Arm Roll") || n.Contains($"{sideName} Arm Twist") || n.Contains($"{sideName} Arm In-Out"))  _idxRotation  = i;
-                else if (n == $"{sideName} Forearm Stretch")  _idxElbow     = i;
-            }
+            float f = flexionDeg   * Mathf.Deg2Rad;
+            float a = abductionDeg * Mathf.Deg2Rad;
+            float c = Mathf.Cos(a);
+            return new Vector3(-Mathf.Sin(a), -c * Mathf.Cos(f), -c * Mathf.Sin(f)).normalized;
+        }
 
-            bool ok = _idxFlexion >= 0 && _idxAbduction >= 0 &&
-                      _idxRotation >= 0 && _idxElbow >= 0;
+        /// <summary>
+        /// Inverse of angle_solver._compute_shoulder_rotation / elbow flexion.
+        /// The forearm sits at <paramref name="elbowDeg"/> from the upper arm,
+        /// swung around it by <paramref name="rotationDeg"/> in the same (e1, e2)
+        /// basis the solver uses, so the round trip reproduces both angles.
+        /// </summary>
+        static Vector3 ForearmDirection(Vector3 u, float elbowDeg, float rotationDeg)
+        {
+            u = u.normalized;
+            Vector3 reference = new Vector3(1f, 0f, 0f);
+            if (Mathf.Abs(Vector3.Dot(u, reference)) > 0.9f) reference = new Vector3(0f, 0f, 1f);
 
-            if (!ok)
-            {
-                string available = "";
-                for(int i=0; i<names.Length; i++) {
-                    if (names[i].Contains($"{sideName} Arm") || names[i].Contains($"{sideName} Forearm")) {
-                        available += " - " + names[i] + "\n";
-                    }
-                }
-                Debug.LogError(
-                    $"[AvatarMuscleController:{sideName}] One or more {sideName.ToLowerInvariant()}-arm muscle indices not found.\n" +
-                    "Ensure the avatar is configured as Humanoid in the FBX import settings.\n" +
-                    $"  Flexion idx   = {_idxFlexion}\n" +
-                    $"  Abduction idx = {_idxAbduction}\n" +
-                    $"  Rotation idx  = {_idxRotation}\n" +
-                    $"  Elbow idx     = {_idxElbow}\n" +
-                    $"Available {sideName.ToLowerInvariant()} arm muscles in this Unity version:\n{available}");
-                enabled = false;
-            }
-            else
-            {
-                Debug.Log($"[AvatarMuscleController:{sideName}] Muscles resolved: " +
-                          $"flex={_idxFlexion} abd={_idxAbduction} " +
-                          $"rot={_idxRotation} elbow={_idxElbow}");
-            }
+            Vector3 e1 = Vector3.Cross(u, reference);
+            if (e1.sqrMagnitude < 1e-18f) return u;
+            e1 = e1.normalized;
+            Vector3 e2 = Vector3.Cross(u, e1);
+
+            float e = elbowDeg    * Mathf.Deg2Rad;
+            float r = rotationDeg * Mathf.Deg2Rad;
+            Vector3 perp = Mathf.Sin(r) * e1 + Mathf.Cos(r) * e2;
+            return (Mathf.Cos(e) * u + Mathf.Sin(e) * perp).normalized;
         }
     }
 }

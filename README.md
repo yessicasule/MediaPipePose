@@ -32,7 +32,7 @@ python/         Vision + processing pipeline (pose estimation, angle
                      pipeline), compare_filters.py, compare_frameworks.py,
                      benchmark_latency.py, evaluate_h36m.py,
                      evaluate_panoptic.py
-  tests/             50 self-contained unit tests (no camera, no GPU,
+  tests/             55 self-contained unit tests (no camera, no GPU,
                      no external dataset required)
 
 unity/UnityMedia/    Unity project: UdpAngleReceiver.cs, ArmAngleController.cs
@@ -64,7 +64,7 @@ pip install numpy scipy pandas matplotlib pyyaml openpyxl
 ```bash
 python -m unittest tests.test_pose_estimators tests.test_evaluation -v
 ```
-All 50 tests should pass; they check the angle-solver math against known
+All 55 tests should pass; they check the angle-solver math against known
 reference-pose geometry, torso-frame orthonormality, filter behavior, the
 MoveNet/PoseNet→MediaPipe keypoint remapping, and the metrics/statistics
 implementations — entirely with synthetic, exactly-known inputs.

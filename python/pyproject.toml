@@ -9,16 +9,16 @@ description = "MonoArm: Monocular Vision-Based Estimation of Human Arm Joint Ang
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "mediapipe>=0.10.9",
+    "mediapipe>=0.10.9,<1.0",
     "opencv-python>=4.8.1",
-    "numpy>=1.24",
+    "numpy>=1.26,<2",
     "pandas>=2.0",
     "matplotlib>=3.7",
     "psutil>=5.9",
     "Pillow>=10.0",
-    "tensorflow>=2.14",
+    "tensorflow>=2.14,<2.18",
     "tensorflow-hub>=0.15",
-    "torch>=2.0.0",
+    "protobuf>=4.25.3,<5",
     "pyyaml",
     "scipy"
 ]

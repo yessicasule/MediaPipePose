@@ -23,13 +23,13 @@ namespace MonoArm
 
             if (Application.isPlaying)
             {
-                EditorGUILayout.LabelField("Live Muscle Values", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("Live Applied Angles (deg)", EditorStyles.miniLabel);
                 using (new EditorGUI.DisabledScope(true))
                 {
-                    EditorGUILayout.FloatField("Flexion",   ctrl.CurrentMuscleFlex);
-                    EditorGUILayout.FloatField("Abduction", ctrl.CurrentMuscleAbd);
-                    EditorGUILayout.FloatField("Rotation",  ctrl.CurrentMuscleRot);
-                    EditorGUILayout.FloatField("Elbow",     ctrl.CurrentMuscleElbow);
+                    EditorGUILayout.FloatField("Flexion",   ctrl.CurrentFlexionDeg);
+                    EditorGUILayout.FloatField("Abduction", ctrl.CurrentAbductionDeg);
+                    EditorGUILayout.FloatField("Rotation",  ctrl.CurrentRotationDeg);
+                    EditorGUILayout.FloatField("Elbow",     ctrl.CurrentElbowDeg);
                 }
                 Repaint();   // refresh every frame during play
             }

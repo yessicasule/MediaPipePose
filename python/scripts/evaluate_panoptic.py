@@ -213,7 +213,7 @@ def main() -> None:
         print(f"  [{fw}]  MPJAE={result.mpjae:.2f} deg  r={result.mean_r:.3f}  "
               f"PCK@5={result.mean_pck_5:.1f}%")
 
-    print_metrics_table(all_results)
+    print_metrics_table(all_results, dataset_name="CMU PANOPTIC")
 
     json_path = out_dir / "metrics_report.json"
     with open(json_path, "w") as f:

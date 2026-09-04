@@ -74,7 +74,7 @@ def _apply_occlusion(
     clean_pred: dict[str, np.ndarray],
     occlusion_rate: float,
     rng: np.random.Generator,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """
     Simulate pose-not-detected frames by zero-order hold.
 
@@ -91,6 +91,7 @@ def _apply_occlusion(
     Returns
     -------
     dict[joint → np.ndarray]  with ZOH applied at occluded frames
+    np.ndarray  boolean mask of the frames that were held
     """
     n = len(next(iter(clean_pred.values())))
     occluded_mask = rng.random(n) < occlusion_rate
@@ -106,8 +107,7 @@ def _apply_occlusion(
                 last = arr[i]
         result[j] = out
 
-    hold_frac = float(occluded_mask.mean())
-    return result, hold_frac
+    return result, occluded_mask
 
 
 def _compute_mae_rmse(pred: dict, gt: dict) -> tuple[float, float]:
@@ -123,20 +123,19 @@ def _compute_mae_rmse(pred: dict, gt: dict) -> tuple[float, float]:
 def _compute_post_hold_drift(
     pred_with_hold: dict[str, np.ndarray],
     clean_pred:     dict[str, np.ndarray],
-    occlusion_rate: float,
-    rng:            np.random.Generator,
+    occluded_mask:  np.ndarray,
 ) -> float:
     """
     Mean absolute angle change needed to 'snap back' to true value after hold.
     Measures how far the estimate drifts during occlusion periods.
     """
-    n    = len(next(iter(clean_pred.values())))
-    mask = rng.random(n) < occlusion_rate
+    if not occluded_mask.any():
+        return 0.0
     diffs = []
     for j in JOINTS:
         if j in pred_with_hold and j in clean_pred:
             d = np.abs(pred_with_hold[j] - clean_pred[j])
-            diffs.append(float(d[mask].mean()) if mask.any() else 0.0)
+            diffs.append(float(d[occluded_mask].mean()))
     return float(np.mean(diffs)) if diffs else 0.0
 
 
@@ -171,13 +170,14 @@ def run_occlusion_benchmark(
             clean_pred[j]   = gt_arrays[j] + rng.normal(mu, sigma, len(gt_arrays[j]))
 
         for rate in OCCLUSION_RATES:
-            pred_with_hold, hold_frac = _apply_occlusion(clean_pred, rate, rng)
-            mae, rmse                  = _compute_mae_rmse(pred_with_hold, gt_arrays)
+            pred_with_hold, occluded_mask = _apply_occlusion(clean_pred, rate, rng)
+            hold_frac                     = float(occluded_mask.mean())
+            mae, rmse                     = _compute_mae_rmse(pred_with_hold, gt_arrays)
 
             # Drift metric only meaningful when occlusion > 0
             drift = 0.0
             if rate > 0.0:
-                drift = _compute_post_hold_drift(pred_with_hold, clean_pred, rate, rng)
+                drift = _compute_post_hold_drift(pred_with_hold, clean_pred, occluded_mask)
 
             row = {
                 "framework":     fw,

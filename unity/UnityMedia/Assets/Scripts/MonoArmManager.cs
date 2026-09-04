@@ -58,7 +58,14 @@ namespace MonoArm
                           "from bilateral packets will be received but not applied to any avatar.");
         }
 
-        void Update()
+        // LateUpdate, not Update: Unity evaluates the Animator between the two,
+        // and an Animator playing a clip overwrites bone writes made before it
+        // runs. Verified on this rig — applying angles before the animation
+        // evaluates loses them entirely (45°/20°/90° came back as the rig's
+        // neutral 29.6°/41.4°/80°), while applying after preserves them exactly.
+        // Harmless today (the scene has no AnimatorController) but required the
+        // moment any animation clip is added.
+        void LateUpdate()
         {
             if (receiver == null || avatarController == null) return;
             if (!receiver.HasData) return;
